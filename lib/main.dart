@@ -804,7 +804,7 @@ class _HomePageState extends State<HomePage> {
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
                     children: [
-                      ...matches.map((m) => FutureBuilder<Map<String, dynamic>?>(future: _loadScorecard(m), builder: (context, scorecard) => _MatchCard(match: m, live: _isLive(m), scorecard: scorecard.data, onTap: () => _openMatchDetails(m, scorecard.data)))),
+                      ...matches.map((m) => FutureBuilder<Map<String, dynamic>?>(future: _loadScorecard(m), builder: (context, scorecard) => _MatchCard(match: m, live: _isLive(m), showPrediction: !_isDone(m), scorecard: scorecard.data, onTap: () => _openMatchDetails(m, scorecard.data)))),
                     ],
                   ),
                 );
@@ -921,9 +921,10 @@ class _LiveMatchCard extends StatelessWidget {
 }
 
 class _MatchCard extends StatelessWidget {
-  const _MatchCard({required this.match, required this.live, required this.onTap, this.scorecard});
+  const _MatchCard({required this.match, required this.live, required this.showPrediction, required this.onTap, this.scorecard});
   final MatchData match;
   final bool live;
+  final bool showPrediction;
   final Map<String, dynamic>? scorecard;
   final VoidCallback onTap;
 
@@ -951,7 +952,22 @@ class _MatchCard extends StatelessWidget {
             ]),
             if (match.score.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 10), child: Text(match.score, style: const TextStyle(color: AppColors.muted))),
             const SizedBox(height: 12),
-            const Row(children: [Icon(Icons.insights, color: AppColors.acid, size: 18), SizedBox(width: 7), Text('Match overview', style: TextStyle(color: AppColors.acid, fontSize: 12)), Spacer(), Icon(Icons.chevron_right, color: AppColors.muted, size: 18)]),
+            Row(children: [
+              if (showPrediction)
+                const Spacer(),
+              if (showPrediction)
+                TextButton(
+                  onPressed: onTap,
+                  style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), shape: const RoundedRectangleBorder(), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                  child: const Text('Prediction  ›', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                )
+              else ...[
+                const Icon(Icons.insights, color: AppColors.acid, size: 18),
+                const SizedBox(width: 7),
+                const Expanded(child: Text('Match overview', style: TextStyle(color: AppColors.acid, fontSize: 12))),
+                const Icon(Icons.chevron_right, color: AppColors.muted, size: 18),
+              ],
+            ]),
           ]),
         ),
       );
