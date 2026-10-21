@@ -999,6 +999,43 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   static const _prompts = ['Top Runs?', 'Top Performer?', 'Match Winner?'];
   final _question = TextEditingController();
   int _selectedTab = 0;
+  int _squadFilter = 0;
+  late Future<List<Map<String, dynamic>>> _players = _loadPlayers();
+
+  Future<List<Map<String, dynamic>>> _loadPlayers() async {
+    if (widget.match.matchId.isEmpty) return [];
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('api.spoda.ai', '/match-player-analysis/players', {'matchId': widget.match.matchId});
+      final response = await (await client.getUrl(uri)).close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Players returned ${response.statusCode}');
+      return _decodePlayers(jsonDecode(body));
+    } finally { client.close(force: true); }
+  }
+
+  List<Map<String, dynamic>> _decodePlayers(Object? value, [String? inheritedTeam]) {
+    final rows = <Map<String, dynamic>>[];
+    if (value is List) {
+      for (final item in value) { rows.addAll(_decodePlayers(item, inheritedTeam)); }
+    } else if (value is Map) {
+      final map = Map<String, dynamic>.from(value);
+      final team = (map['teamName'] ?? map['team_name'] ?? map['team'] ?? map['name'] ?? inheritedTeam)?.toString();
+      final nested = map['players'] ?? map['squad'] ?? map['playerList'] ?? map['player_list'];
+      if (nested is List) {
+        rows.addAll(_decodePlayers(nested, team));
+      } else if (map['player'] is Map) {
+        rows.addAll(_decodePlayers(map['player'], team));
+      } else if (map['playerName'] != null || map['player_name'] != null || map['fullName'] != null || map['name'] != null) {
+        rows.add({...map, if (inheritedTeam != null) '_teamLabel': inheritedTeam});
+      } else {
+        for (final entry in map.entries) {
+          if (entry.value is List || entry.value is Map) rows.addAll(_decodePlayers(entry.value, entry.key.toString()));
+        }
+      }
+    }
+    return rows;
+  }
 
   @override
   void dispose() { _question.dispose(); super.dispose(); }
@@ -1020,10 +1057,81 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             onTap: () => setState(() => _selectedTab = i),
             child: Column(children: [Expanded(child: Center(child: Text(_tabs[i], maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: _selectedTab == i ? Colors.white : AppColors.muted, fontWeight: _selectedTab == i ? FontWeight.w700 : FontWeight.w400)))), Container(height: 2, color: _selectedTab == i ? AppColors.acid : Colors.transparent)]),
           ))))),
-          const Expanded(child: SizedBox.expand()),
+          Expanded(child: _selectedTab == 2 ? _squadsContent() : const SizedBox.expand()),
           _askAiSection(),
         ])),
       );
+
+  Widget _squadsContent() => Column(children: [
+    const SizedBox(height: 12),
+    SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
+      _squadChip('Whole Squad', 0), const SizedBox(width: 8), _squadChip('Top Batter', 1), const SizedBox(width: 8), _squadChip('Top Bowler', 2),
+    ])),
+    const SizedBox(height: 12),
+    Expanded(child: FutureBuilder<List<Map<String, dynamic>>>(future: _players, builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: AppColors.acid));
+      if (snapshot.hasError) return const Center(child: Text('Could not load players', style: TextStyle(color: AppColors.muted)));
+      final players = snapshot.data ?? [];
+      final filtered = players.where((player) {
+        final playingRoles = '${player['playingRoles'] ?? player['playing_roles'] ?? player['playingRole'] ?? player['playing_role'] ?? ''}'.toLowerCase();
+        if (_squadFilter == 1) return playingRoles.contains('bat');
+        if (_squadFilter == 2) return playingRoles.contains('bowl');
+        return true;
+      }).toList();
+      if (filtered.isEmpty) return Center(child: Text(players.isEmpty ? 'No squad information available' : 'No players in this category', style: const TextStyle(color: AppColors.muted)));
+      final teamA = widget.match.teamName('A', scorecard: widget.scorecard);
+      final teamB = widget.match.teamName('B', scorecard: widget.scorecard);
+      final groups = <String, List<Map<String, dynamic>>>{teamA: [], teamB: []};
+      for (final player in filtered) {
+        final label = (player['_teamLabel'] ?? player['teamName'] ?? player['team_name'] ?? player['team'] ?? '').toString().toLowerCase();
+        final goesToB = label.isNotEmpty && (label == teamB.toLowerCase() || teamB.toLowerCase().contains(label) || label.contains(teamB.toLowerCase()));
+        groups[goesToB ? teamB : teamA]!.add(player);
+      }
+      return Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Expanded(child: _squadTeamColumn(teamA, groups[teamA]!)),
+        Container(width: 1, color: AppColors.border),
+        Expanded(child: _squadTeamColumn(teamB, groups[teamB]!)),
+      ]);
+    })),
+  ]);
+
+  Widget _squadTeamColumn(String teamName, List<Map<String, dynamic>> players) => Column(children: [
+    Container(width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 11), decoration: const BoxDecoration(color: AppColors.surface, border: Border(bottom: BorderSide(color: AppColors.border))),
+      child: Text(teamName, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700))),
+    Expanded(child: ListView.builder(itemCount: players.length, itemBuilder: (context, index) {
+        final player = players[index];
+        final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? 'Player').toString();
+        final playingRoles = '${player['playingRoles'] ?? player['playing_roles'] ?? player['playingRole'] ?? player['playing_role'] ?? ''}'.toLowerCase();
+        final battingStyle = (player['longBattingStyles'] ?? player['long_batting_styles'] ?? '').toString();
+        final bowlingStyle = (player['longBowlingStyles'] ?? player['long_bowling_styles'] ?? '').toString();
+        final isAllRounderOrKeeper = playingRoles.contains('all') || playingRoles.contains('wk') || playingRoles.contains('wicket');
+        final style = _squadFilter == 1
+            ? battingStyle
+            : _squadFilter == 2
+                ? bowlingStyle
+                : isAllRounderOrKeeper
+                    ? [if (battingStyle.isNotEmpty) battingStyle, if (bowlingStyle.isNotEmpty) bowlingStyle].join(' • ')
+                    : [if (playingRoles.contains('bat') && battingStyle.isNotEmpty) battingStyle, if (playingRoles.contains('bowl') && bowlingStyle.isNotEmpty) bowlingStyle].join(' • ');
+        final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
+        return Container(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 5), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: Column(
+          children: [
+            Row(children: [
+              CircleAvatar(radius: 15, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 17, color: AppColors.muted) : null),
+              const SizedBox(width: 5),
+              Expanded(child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
+            ]),
+            const SizedBox(height: 3),
+            if (style.isNotEmpty) Align(alignment: Alignment.centerLeft, child: Text(style, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9, color: AppColors.muted))),
+          ],
+        ));
+      })),
+  ]);
+
+  Widget _squadChip(String label, int index) => InkWell(onTap: () => setState(() => _squadFilter = index), child: Container(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+    decoration: BoxDecoration(color: _squadFilter == index ? AppColors.acid : AppColors.surface, border: Border.all(color: _squadFilter == index ? AppColors.acid : AppColors.border)),
+    child: Text(label, style: TextStyle(color: _squadFilter == index ? Colors.black : AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)),
+  ));
 
   Widget _detailTeam(MatchData match, String side, {bool rightAlign = false}) {
     final name = match.teamName(side, scorecard: widget.scorecard);
