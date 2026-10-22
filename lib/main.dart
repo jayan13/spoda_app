@@ -1005,12 +1005,87 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   int _batterThreshold = 0;
   int _comparisonMetric = 0;
   String? _selectedBatsmanId;
+  int _bowlerMetric = 0;
+  int _bowlerThreshold = 0;
+  String? _selectedBowlerId;
+  bool _bowlerDefaultApplied = false;
+  int _bowlerComparisonMetric = 0;
   Future<List<Map<String, dynamic>>> _topBatters = Future.value(const []);
   Future<Object?> _batterComparison = Future.value(null);
+  Future<List<Map<String, dynamic>>> _topBowlers = Future.value(const []);
+  Future<Object?> _bowlerComparison = Future.value(null);
   late final Future<List<Map<String, dynamic>>> _players = _loadPlayers();
+  late final Future<Object?> _preMatchReport = _loadMatchReport();
+
+  Future<Object?> _loadMatchReport() async {
+    if (widget.match.matchId.isEmpty) return null;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('spoda.ai', '/api/match-report', {'matchId': widget.match.matchId});
+      final response = await (await client.getUrl(uri)).close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Match report returned ${response.statusCode}');
+      return jsonDecode(body);
+    } finally { client.close(force: true); }
+  }
 
   static const _batterMetrics = ['Run Scored', 'Strike Rate', 'Balls Faced'];
   static const _comparisonMetrics = ['Dismissal', 'Strike rate'];
+  static const _bowlerMetrics = ['Wicket Taken', 'Economy Rate', 'Boundaries'];
+  static const _bowlerComparisonMetrics = ['Dismissal', 'Strike rate'];
+  List<String> get _bowlerThresholds => switch (_bowlerMetric) {
+    0 => ['1 or more', '2 or more', '3 or more'],
+    1 => ['Up to 6', 'Up to 7', 'Up to 8'],
+    _ => ['Up to 4', 'Up to 10'],
+  };
+
+  void _selectBowlerMetric(int? value) {
+    if (value == null) return;
+    setState(() { _bowlerMetric = value; _bowlerThreshold = 0; _loadTopBowlers(); });
+  }
+
+  void _selectBowlerThreshold(int? value) {
+    if (value == null) return;
+    setState(() { _bowlerThreshold = value; _loadTopBowlers(); });
+  }
+
+  void _loadTopBowlers() {
+    final threshold = int.parse(_bowlerThresholds[_bowlerThreshold].split(' ')[_bowlerMetric == 0 ? 0 : 2]);
+    final (path, parameter) = switch (_bowlerMetric) {
+      0 => ('/top-bowler/wickets', 'minWicketsTaken'),
+      1 => ('/top-bowler/economy', 'maxEconomyRate'),
+      _ => ('/top-bowler/boundaries', 'maxBoundaries'),
+    };
+    _topBowlers = _fetchTopBatters(path, parameter, threshold);
+  }
+
+  void _selectBowler(String? playerId) {
+    setState(() { _bowlerDefaultApplied = true; _selectedBowlerId = playerId; _loadBowlerComparison(); });
+  }
+
+  void _selectBowlerComparisonMetric(int? metric) {
+    if (metric == null) return;
+    setState(() { _bowlerComparisonMetric = metric; _loadBowlerComparison(); });
+  }
+
+  void _loadBowlerComparison() {
+    final path = _bowlerComparisonMetric == 0
+        ? '/top-bowler/compare/dismissal-rate'
+        : '/top-bowler/compare/strike-rate';
+    _bowlerComparison = _fetchBowlerComparison(path, _selectedBowlerId ?? '');
+  }
+
+  Future<Object?> _fetchBowlerComparison(String path, String bowlerId) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('api.spoda.ai', path, {'matchId': widget.match.matchId, 'bowlerId': bowlerId});
+      final response = await (await client.getUrl(uri)).close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Bowler comparison returned ${response.statusCode}');
+      final decoded = jsonDecode(body);
+      return decoded is Map ? (decoded['data'] ?? decoded['results'] ?? decoded) : decoded;
+    } finally { client.close(force: true); }
+  }
   List<String> get _batterThresholds => switch (_batterMetric) {
     0 => ['20 or more', '50 or more', '100 or more'],
     1 => ['50 or more', '100 or more'],
@@ -1152,10 +1227,70 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             onTap: () => setState(() => _selectedTab = i),
             child: Column(children: [Expanded(child: Center(child: Text(_tabs[i], maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: _selectedTab == i ? Colors.white : AppColors.muted, fontWeight: _selectedTab == i ? FontWeight.w700 : FontWeight.w400)))), Container(height: 2, color: _selectedTab == i ? AppColors.acid : Colors.transparent)]),
           ))))),
-          Expanded(child: _selectedTab == 2 ? _squadsContent() : const SizedBox.expand()),
+          Expanded(child: switch (_selectedTab) {
+            0 => _preMatchReportContent(),
+            2 => _squadsContent(),
+            _ => const SizedBox.expand(),
+          }),
           _askAiSection(),
         ])),
       );
+
+  Widget _preMatchReportContent() => FutureBuilder<Object?>(
+    future: _preMatchReport,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: AppColors.acid));
+      if (snapshot.hasError) return const Center(child: Text('Could not load match report', style: TextStyle(color: AppColors.muted)));
+      if (snapshot.data == null) return const Center(child: Text('No match report available', style: TextStyle(color: AppColors.muted)));
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          const Text('Pre-match Report', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 10),
+          _reportValue(snapshot.data),
+        ]),
+      );
+    },
+  );
+
+  Widget _reportValue(Object? value, {String? label}) {
+    if (value == null) return const SizedBox.shrink();
+    if (value is Map) {
+      final entries = value.entries.where((entry) => entry.value != null).toList();
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        for (final entry in entries)
+          Padding(padding: const EdgeInsets.only(bottom: 8), child: _reportValue(entry.value, label: _reportLabel(entry.key.toString()))),
+      ]);
+    }
+    if (value is List) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        if (label != null) Padding(padding: const EdgeInsets.only(bottom: 5), child: Text(label, style: const TextStyle(color: AppColors.acid, fontSize: 12, fontWeight: FontWeight.w700))),
+        for (final item in value) Padding(padding: const EdgeInsets.only(bottom: 6), child: _reportValue(item)),
+      ]);
+    }
+    final text = value.toString().trim();
+    if (text.isEmpty) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: const BoxDecoration(color: AppColors.surface, border: Border.fromBorderSide(BorderSide(color: AppColors.border))),
+      child: label == null
+          ? Text(text, style: const TextStyle(fontSize: 12, height: 1.4))
+          : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(label, style: const TextStyle(color: AppColors.acid, fontSize: 12, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 5),
+              Text(text, style: const TextStyle(fontSize: 12, height: 1.4)),
+            ]),
+    );
+  }
+
+  String _reportLabel(String key) => key
+      .replaceAll(RegExp(r'([a-z])([A-Z])'), r'$1 $2')
+      .replaceAll('_', ' ')
+      .replaceAll('-', ' ')
+      .split(' ')
+      .where((word) => word.isNotEmpty)
+      .map((word) => '${word[0].toUpperCase()}${word.substring(1)}')
+      .join(' ');
 
   Widget _squadsContent() => Column(children: [
     const SizedBox(height: 12),
@@ -1163,21 +1298,21 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       _squadChip('Whole Squad', 0), const SizedBox(width: 8), _squadChip('Top Batter', 1), const SizedBox(width: 8), _squadChip('Top Bowler', 2),
     ])),
     const SizedBox(height: 12),
-    if (_squadFilter == 1) ...[
+    if (_squadFilter == 1 || _squadFilter == 2) ...[
       Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Row(children: [
-        Expanded(child: _batterModeChip('Top Batter', 0)),
+        Expanded(child: _batterModeChip(_squadFilter == 1 ? 'Top Batter' : 'Top Bowler', 0)),
         const SizedBox(width: 8),
-        Expanded(child: _batterModeChip('Batter Vs Bowler', 1)),
+        Expanded(child: _batterModeChip(_squadFilter == 1 ? 'Batter Vs Bowler' : 'Bowler Vs Batter', 1)),
       ])),
       const SizedBox(height: 10),
       if (_batterSubtab == 0) ...[
-        const Padding(padding: EdgeInsets.fromLTRB(12, 4, 12, 10), child: Align(alignment: Alignment.centerLeft, child: Text('Top Batsman Probabilities', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)))),
+        Padding(padding: const EdgeInsets.fromLTRB(12, 4, 12, 10), child: Align(alignment: Alignment.centerLeft, child: Text(_squadFilter == 1 ? 'Top Batsman Probabilities' : 'Top Bowler Probabilities', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)))),
         Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Row(children: [
-          Expanded(child: _batterDropdown<int>(value: _batterMetric, items: List.generate(_batterMetrics.length, (i) => DropdownMenuItem(value: i, child: Text(_batterMetrics[i]))), onChanged: _selectBatterMetric)),
+          Expanded(child: _batterDropdown<int>(value: _squadFilter == 1 ? _batterMetric : _bowlerMetric, items: List.generate(_squadFilter == 1 ? _batterMetrics.length : _bowlerMetrics.length, (i) => DropdownMenuItem(value: i, child: Text(_squadFilter == 1 ? _batterMetrics[i] : _bowlerMetrics[i]))), onChanged: _squadFilter == 1 ? _selectBatterMetric : _selectBowlerMetric)),
           const SizedBox(width: 8),
-          Expanded(child: _batterDropdown<int>(value: _batterThreshold, items: List.generate(_batterThresholds.length, (i) => DropdownMenuItem(value: i, child: Text(_batterThresholds[i]))), onChanged: _selectBatterThreshold)),
+          Expanded(child: _batterDropdown<int>(value: _squadFilter == 1 ? _batterThreshold : _bowlerThreshold, items: List.generate(_squadFilter == 1 ? _batterThresholds.length : _bowlerThresholds.length, (i) => DropdownMenuItem(value: i, child: Text(_squadFilter == 1 ? _batterThresholds[i] : _bowlerThresholds[i]))), onChanged: _squadFilter == 1 ? _selectBatterThreshold : _selectBowlerThreshold)),
         ])),
-      ] else
+      ] else if (_squadFilter == 1)
         Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: FutureBuilder<List<Map<String, dynamic>>>(future: _players, builder: (context, playerSnapshot) {
           final players = playerSnapshot.data ?? [];
           final identifiedPlayers = players.where((player) => _batsmanId(player) != null).toList();
@@ -1192,16 +1327,38 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             const SizedBox(width: 8),
             Expanded(child: _batterDropdown<int>(value: _comparisonMetric, items: List.generate(_comparisonMetrics.length, (i) => DropdownMenuItem(value: i, child: Text(_comparisonMetrics[i]))), onChanged: _selectComparisonMetric)),
           ]);
+        }))
+      else
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: FutureBuilder<List<Map<String, dynamic>>>(future: _players, builder: (context, playerSnapshot) {
+          final players = (playerSnapshot.data ?? []).where((p) => _isBowlerOrAllRounder(p) && _playerId(p) != null).toList();
+          if (playerSnapshot.connectionState == ConnectionState.waiting) return const LinearProgressIndicator(color: AppColors.acid);
+          if (playerSnapshot.hasError) return const Text('Could not load bowlers', style: TextStyle(color: AppColors.muted, fontSize: 11));
+          final selectedId = players.any((p) => _playerId(p) == _selectedBowlerId) ? _selectedBowlerId : null;
+          final defaultBowlerId = selectedId ?? (players.isNotEmpty ? _playerId(players.first) : null);
+          if (!_bowlerDefaultApplied && _selectedBowlerId == null && defaultBowlerId != null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted || _bowlerDefaultApplied || _selectedBowlerId != null) return;
+              _bowlerDefaultApplied = true;
+              _selectedBowlerId = defaultBowlerId;
+              if (_batterSubtab == 1 && _squadFilter == 2) _loadBowlerComparison();
+              setState(() {});
+            });
+          }
+          return Row(children: [
+            Expanded(child: _batterDropdown<String?>(value: defaultBowlerId, items: [const DropdownMenuItem<String?>(value: null, child: Text('Select Bowler')), ...players.map((p) => DropdownMenuItem<String?>(value: _playerId(p), child: Text(_playerName(p), overflow: TextOverflow.ellipsis)))], onChanged: _selectBowler)),
+            const SizedBox(width: 8),
+            Expanded(child: _batterDropdown<int>(value: _bowlerComparisonMetric, items: List.generate(_bowlerComparisonMetrics.length, (i) => DropdownMenuItem(value: i, child: Text(_bowlerComparisonMetrics[i]))), onChanged: _selectBowlerComparisonMetric)),
+          ]);
         })),
     ],
-    Expanded(child: _squadFilter == 1 && _batterSubtab == 1
-      ? _comparisonResults()
-      : FutureBuilder<List<Map<String, dynamic>>>(future: _squadFilter == 1 ? _topBatters : _players, builder: (context, snapshot) {
+    Expanded(child: (_squadFilter == 1 || _squadFilter == 2) && _batterSubtab == 1
+      ? _comparisonResults(isBowler: _squadFilter == 2)
+      : FutureBuilder<List<Map<String, dynamic>>>(future: _squadFilter == 1 ? _topBatters : _squadFilter == 2 ? _topBowlers : _players, builder: (context, snapshot) {
       if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: AppColors.acid));
       if (snapshot.hasError) return Center(child: Text(_squadFilter == 1 ? 'Could not load top batter data' : 'Could not load players', style: const TextStyle(color: AppColors.muted)));
       final players = snapshot.data ?? [];
-      if (_squadFilter == 1) {
-        if (players.isEmpty) return const Center(child: Text('No top batter data available', style: TextStyle(color: AppColors.muted)));
+      if (_squadFilter == 1 || _squadFilter == 2) {
+        if (players.isEmpty) return Center(child: Text(_squadFilter == 1 ? 'No top batter data available' : 'No top bowler data available', style: const TextStyle(color: AppColors.muted)));
         return ListView.builder(itemCount: players.length, itemBuilder: (context, index) => _topBatterRow(players[index]));
       }
       final filtered = players.where((player) {
@@ -1227,21 +1384,33 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   ]);
 
   String? _batsmanId(Map<String, dynamic> player) => (player['playerId'] ?? player['player_id'] ?? player['batsmanId'] ?? player['batsman_id'] ?? player['id'])?.toString();
+  String? _playerId(Map<String, dynamic> player) => (player['playerId'] ?? player['player_id'] ?? player['id'])?.toString();
+  bool _isBowlerOrAllRounder(Map<String, dynamic> player) {
+    final roles = player['playingRoles'] ?? player['playingRole'] ?? player['playing_role'] ?? player['role'] ?? player['position'];
+    final text = roles is List ? roles.join(' ').toLowerCase() : '${roles ?? ''}'.toLowerCase();
+    return text.contains('bowl') || text.contains('allround') || text.contains('all-round');
+  }
   String _playerName(Map<String, dynamic> player) => (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? 'Player').toString();
 
   Widget _batterModeChip(String label, int value) => InkWell(
     onTap: () => setState(() {
       _batterSubtab = value;
-      if (value == 1) _loadBatterComparison();
+      if (value == 1) {
+        if (_squadFilter == 2) {
+          _loadBowlerComparison();
+        } else {
+          _loadBatterComparison();
+        }
+      }
     }),
     child: Container(height: 32, alignment: Alignment.center, decoration: BoxDecoration(color: _batterSubtab == value ? const Color(0xFF292929) : AppColors.surface, border: Border.all(color: _batterSubtab == value ? AppColors.border : AppColors.border)), child: Text(label, style: TextStyle(fontSize: 11, color: _batterSubtab == value ? Colors.white : AppColors.muted))),
   );
 
-  Widget _comparisonResults() => FutureBuilder<Object?>(future: _batterComparison, builder: (context, snapshot) {
+  Widget _comparisonResults({bool isBowler = false}) => FutureBuilder<Object?>(future: isBowler ? _bowlerComparison : _batterComparison, builder: (context, snapshot) {
     if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: AppColors.acid));
     if (snapshot.hasError) return const Center(child: Text('Could not load batter comparison', style: TextStyle(color: AppColors.muted)));
-    final rows = _comparisonRows(snapshot.data);
-    if (_selectedBatsmanId == null) return const Center(child: Text('Select a batter to view comparison', style: TextStyle(color: AppColors.muted)));
+    final rows = _comparisonRows(snapshot.data, isBowler: isBowler);
+    if (!isBowler && _selectedBatsmanId == null) return const Center(child: Text('Select a batter to view comparison', style: TextStyle(color: AppColors.muted)));
     if (rows.isEmpty) return const Center(child: Text('No comparison data available', style: TextStyle(color: AppColors.muted)));
     return ListView(
       children: rows.map((row) => Container(
@@ -1249,21 +1418,21 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         child: ListTile(
           dense: true,
           title: Text(row.$1, style: const TextStyle(fontSize: 12)),
-          subtitle: Text(_comparisonMetric == 0 ? 'Probable Dismissal Rate' : 'Probable Strike Rate', style: const TextStyle(fontSize: 10, color: AppColors.muted)),
+          subtitle: Text((isBowler ? _bowlerComparisonMetric : _comparisonMetric) == 0 ? 'Probable Dismissal Rate' : 'Probable Strike Rate', style: const TextStyle(fontSize: 10, color: AppColors.muted)),
           trailing: Text(row.$2, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.acid)),
         ),
       )).toList(),
     );
   });
 
-  List<(String, String)> _comparisonRows(Object? data, [String? inheritedBowler]) {
+  List<(String, String)> _comparisonRows(Object? data, {String? inheritedBowler, bool isBowler = false}) {
     if (data is List) {
-      return [for (final item in data) ..._comparisonRows(item, inheritedBowler)];
+      return [for (final item in data) ..._comparisonRows(item, inheritedBowler: inheritedBowler, isBowler: isBowler)];
     }
     if (data is! Map) return [];
     final map = Map<String, dynamic>.from(data);
     final bowler = (map['playerName'] ?? map['player_name'] ?? map['bowlerName'] ?? map['bowler_name'] ?? map['bowler'] ?? map['fullName'] ?? map['name'] ?? inheritedBowler)?.toString();
-    final metricProbability = _comparisonMetric == 0
+    final metricProbability = (isBowler ? _bowlerComparisonMetric : _comparisonMetric) == 0
         ? (map['probableDismissalRate'] ?? map['probable_dismissal_rate'])
         : (map['probableStrikeRate'] ?? map['probable_strike_rate']);
     final probability = metricProbability ?? map['probability'] ?? map['dismissalProbability'] ?? map['dismissal_probability'] ?? map['strikeRate'] ?? map['strike_rate'] ?? map['probabilityPercentage'] ?? map['percentage'] ?? map['value'];
@@ -1273,13 +1442,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     }
     final rows = <(String, String)>[];
     for (final key in ['data', 'results', 'bowlers', 'comparisons']) {
-      if (map[key] != null) rows.addAll(_comparisonRows(map[key], inheritedBowler));
+      if (map[key] != null) rows.addAll(_comparisonRows(map[key], inheritedBowler: inheritedBowler, isBowler: isBowler));
     }
     if (rows.isNotEmpty) return rows;
     for (final entry in map.entries) {
       if (const {'code', 'message', 'squadAnnounced', 'squad_announced'}.contains(entry.key)) continue;
       if (entry.value is Map || entry.value is List) {
-        rows.addAll(_comparisonRows(entry.value, entry.key));
+        rows.addAll(_comparisonRows(entry.value, inheritedBowler: entry.key, isBowler: isBowler));
       } else if (entry.value != null && inheritedBowler == null) {
         // Some responses encode each bowler as a map key and probability as its value.
         final value = entry.value.toString();
@@ -1315,6 +1484,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Widget _squadChip(String label, int index) => InkWell(onTap: () => setState(() {
     _squadFilter = index;
     if (index == 1) _loadTopBatters();
+    if (index == 2) _loadTopBowlers();
   }), child: Container(
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
     decoration: BoxDecoration(color: _squadFilter == index ? AppColors.acid : AppColors.surface, border: Border.all(color: _squadFilter == index ? AppColors.acid : AppColors.border)),
@@ -1475,7 +1645,32 @@ class _SideMenuState extends State<_SideMenu> {
       const Padding(padding: EdgeInsets.fromLTRB(18, 12, 18, 4), child: Align(alignment: Alignment.centerLeft, child: Text('Legal', style: TextStyle(color: AppColors.muted, fontSize: 11)))),
       _menuItem(context, Icons.article_outlined, 'Terms of Use'), _menuItem(context, Icons.lock_outline, 'Privacy Policy'),
       const Spacer(),
-      if (profile != null) ListTile(leading: const Icon(Icons.logout, color: AppColors.muted), title: const Text('Sign out'), onTap: () async { await AuthService.instance.logout(); if (context.mounted) Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const LandingPage()), (_) => false); }),
+      FutureBuilder<String?>(
+        future: _tokenFuture,
+        builder: (context, tokenSnapshot) {
+          final loggedIn = (tokenSnapshot.data ?? '').isNotEmpty;
+          if (tokenSnapshot.connectionState == ConnectionState.waiting) return const SizedBox.shrink();
+          if (loggedIn) {
+            return ListTile(
+              leading: const Icon(Icons.logout, color: AppColors.muted),
+              title: const Text('Logout'),
+              onTap: () async {
+                await AuthService.instance.logout();
+                if (context.mounted) Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const LandingPage()), (_) => false);
+              },
+            );
+          }
+          return ListTile(
+            leading: const Icon(Icons.login, color: AppColors.muted),
+            title: const Text('Login'),
+            onTap: () {
+              final navigator = Navigator.of(context);
+              navigator.pop();
+              navigator.push(MaterialPageRoute(builder: (_) => const EmailLoginPage()));
+            },
+          );
+        },
+      ),
       FutureBuilder<String?>(
         future: _tokenFuture,
         builder: (context, tokenSnapshot) {
