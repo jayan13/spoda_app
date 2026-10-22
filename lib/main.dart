@@ -1000,7 +1000,102 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   final _question = TextEditingController();
   int _selectedTab = 0;
   int _squadFilter = 0;
-  late Future<List<Map<String, dynamic>>> _players = _loadPlayers();
+  int _batterSubtab = 0;
+  int _batterMetric = 0;
+  int _batterThreshold = 0;
+  int _comparisonMetric = 0;
+  String? _selectedBatsmanId;
+  Future<List<Map<String, dynamic>>> _topBatters = Future.value(const []);
+  Future<Object?> _batterComparison = Future.value(null);
+  late final Future<List<Map<String, dynamic>>> _players = _loadPlayers();
+
+  static const _batterMetrics = ['Run Scored', 'Strike Rate', 'Balls Faced'];
+  static const _comparisonMetrics = ['Dismissal', 'Strike rate'];
+  List<String> get _batterThresholds => switch (_batterMetric) {
+    0 => ['20 or more', '50 or more', '100 or more'],
+    1 => ['50 or more', '100 or more'],
+    _ => ['10 or more', '20 or more', '50 or more'],
+  };
+
+  void _selectBatterMetric(int? value) {
+    if (value == null) return;
+    setState(() {
+      _batterMetric = value;
+      _batterThreshold = 0;
+      _loadTopBatters();
+    });
+  }
+
+  void _selectBatterThreshold(int? value) {
+    if (value == null) return;
+    setState(() {
+      _batterThreshold = value;
+      _loadTopBatters();
+    });
+  }
+
+  void _loadTopBatters() {
+    final metric = _batterMetric;
+    final threshold = int.parse(_batterThresholds[_batterThreshold].split(' ').first);
+    final (path, parameter) = switch (metric) {
+      0 => ('/top-bastman/runs-scored', 'minRunsScored'),
+      1 => ('/top-bastman/strike-rate', 'minStrikeRate'),
+      _ => ('/top-bastman/balls-faced', 'minBallsFaced'),
+    };
+    _topBatters = _fetchTopBatters(path, parameter, threshold);
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchTopBatters(String path, String parameter, int threshold) async {
+    if (widget.match.matchId.isEmpty) return [];
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('api.spoda.ai', path, {'matchId': widget.match.matchId, parameter: '$threshold'});
+      final response = await (await client.getUrl(uri)).close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Top batter returned ${response.statusCode}');
+      final decoded = jsonDecode(body);
+      return _decodePlayers(decoded is Map ? (decoded['data'] ?? decoded['results'] ?? decoded['players'] ?? decoded) : decoded);
+    } finally { client.close(force: true); }
+  }
+
+  void _selectComparisonPlayer(String? playerId) {
+    setState(() {
+      _selectedBatsmanId = playerId;
+      _loadBatterComparison();
+    });
+  }
+
+  void _selectComparisonMetric(int? metric) {
+    if (metric == null) return;
+    setState(() {
+      _comparisonMetric = metric;
+      _loadBatterComparison();
+    });
+  }
+
+  void _loadBatterComparison() {
+    final playerId = _selectedBatsmanId;
+    if (playerId == null) {
+      _batterComparison = Future.value(null);
+      return;
+    }
+    final path = _comparisonMetric == 0
+        ? '/top-bastman/compare/dismissal-rate'
+        : '/top-bastman/compare/strike-rate';
+    _batterComparison = _fetchBatterComparison(path, playerId);
+  }
+
+  Future<Object?> _fetchBatterComparison(String path, String playerId) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('api.spoda.ai', path, {'matchId': widget.match.matchId, 'batsmanId': playerId});
+      final response = await (await client.getUrl(uri)).close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Batter comparison returned ${response.statusCode}');
+      final decoded = jsonDecode(body);
+      return decoded is Map ? (decoded['data'] ?? decoded['results'] ?? decoded) : decoded;
+    } finally { client.close(force: true); }
+  }
 
   Future<List<Map<String, dynamic>>> _loadPlayers() async {
     if (widget.match.matchId.isEmpty) return [];
@@ -1021,13 +1116,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     } else if (value is Map) {
       final map = Map<String, dynamic>.from(value);
       final team = (map['teamName'] ?? map['team_name'] ?? map['team'] ?? map['name'] ?? inheritedTeam)?.toString();
-      final nested = map['players'] ?? map['squad'] ?? map['playerList'] ?? map['player_list'];
+      final nested = map['players'] ?? map['squad'] ?? map['playerList'] ?? map['player_list'] ?? map['data'] ?? map['results'];
       if (nested is List) {
         rows.addAll(_decodePlayers(nested, team));
       } else if (map['player'] is Map) {
         rows.addAll(_decodePlayers(map['player'], team));
       } else if (map['playerName'] != null || map['player_name'] != null || map['fullName'] != null || map['name'] != null) {
-        rows.add({...map, if (inheritedTeam != null) '_teamLabel': inheritedTeam});
+        rows.add({...map, '_teamLabel': ?inheritedTeam});
       } else {
         for (final entry in map.entries) {
           if (entry.value is List || entry.value is Map) rows.addAll(_decodePlayers(entry.value, entry.key.toString()));
@@ -1068,66 +1163,159 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       _squadChip('Whole Squad', 0), const SizedBox(width: 8), _squadChip('Top Batter', 1), const SizedBox(width: 8), _squadChip('Top Bowler', 2),
     ])),
     const SizedBox(height: 12),
-    Expanded(child: FutureBuilder<List<Map<String, dynamic>>>(future: _players, builder: (context, snapshot) {
+    if (_squadFilter == 1) ...[
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Row(children: [
+        Expanded(child: _batterModeChip('Top Batter', 0)),
+        const SizedBox(width: 8),
+        Expanded(child: _batterModeChip('Batter Vs Bowler', 1)),
+      ])),
+      const SizedBox(height: 10),
+      if (_batterSubtab == 0) ...[
+        const Padding(padding: EdgeInsets.fromLTRB(12, 4, 12, 10), child: Align(alignment: Alignment.centerLeft, child: Text('Top Batsman Probabilities', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)))),
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Row(children: [
+          Expanded(child: _batterDropdown<int>(value: _batterMetric, items: List.generate(_batterMetrics.length, (i) => DropdownMenuItem(value: i, child: Text(_batterMetrics[i]))), onChanged: _selectBatterMetric)),
+          const SizedBox(width: 8),
+          Expanded(child: _batterDropdown<int>(value: _batterThreshold, items: List.generate(_batterThresholds.length, (i) => DropdownMenuItem(value: i, child: Text(_batterThresholds[i]))), onChanged: _selectBatterThreshold)),
+        ])),
+      ] else
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: FutureBuilder<List<Map<String, dynamic>>>(future: _players, builder: (context, playerSnapshot) {
+          final players = playerSnapshot.data ?? [];
+          final identifiedPlayers = players.where((player) => _batsmanId(player) != null).toList();
+          if (playerSnapshot.connectionState == ConnectionState.waiting) return const LinearProgressIndicator(color: AppColors.acid);
+          if (playerSnapshot.hasError || identifiedPlayers.isEmpty) return const Text('No players available for comparison', style: TextStyle(color: AppColors.muted, fontSize: 11));
+          final selectedId = identifiedPlayers.any((p) => _batsmanId(p) == _selectedBatsmanId) ? _selectedBatsmanId : null;
+          return Row(children: [
+            Expanded(child: _batterDropdown<String?>(value: selectedId, items: [
+              const DropdownMenuItem<String?>(value: null, child: Text('Select batter')),
+              ...identifiedPlayers.map((player) => DropdownMenuItem<String?>(value: _batsmanId(player)!, child: Text(_playerName(player), overflow: TextOverflow.ellipsis))),
+            ], onChanged: _selectComparisonPlayer)),
+            const SizedBox(width: 8),
+            Expanded(child: _batterDropdown<int>(value: _comparisonMetric, items: List.generate(_comparisonMetrics.length, (i) => DropdownMenuItem(value: i, child: Text(_comparisonMetrics[i]))), onChanged: _selectComparisonMetric)),
+          ]);
+        })),
+    ],
+    Expanded(child: _squadFilter == 1 && _batterSubtab == 1
+      ? _comparisonResults()
+      : FutureBuilder<List<Map<String, dynamic>>>(future: _squadFilter == 1 ? _topBatters : _players, builder: (context, snapshot) {
       if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: AppColors.acid));
-      if (snapshot.hasError) return const Center(child: Text('Could not load players', style: TextStyle(color: AppColors.muted)));
+      if (snapshot.hasError) return Center(child: Text(_squadFilter == 1 ? 'Could not load top batter data' : 'Could not load players', style: const TextStyle(color: AppColors.muted)));
       final players = snapshot.data ?? [];
+      if (_squadFilter == 1) {
+        if (players.isEmpty) return const Center(child: Text('No top batter data available', style: TextStyle(color: AppColors.muted)));
+        return ListView.builder(itemCount: players.length, itemBuilder: (context, index) => _topBatterRow(players[index]));
+      }
       final filtered = players.where((player) {
-        final playingRoles = '${player['playingRoles'] ?? player['playing_roles'] ?? player['playingRole'] ?? player['playing_role'] ?? ''}'.toLowerCase();
-        if (_squadFilter == 1) return playingRoles.contains('bat');
-        if (_squadFilter == 2) return playingRoles.contains('bowl');
+        final role = '${player['role'] ?? player['playingRole'] ?? player['playing_role'] ?? player['position'] ?? ''}'.toLowerCase();
+        if (_squadFilter == 1) return role.contains('bat');
+        if (_squadFilter == 2) return role.contains('bowl');
         return true;
       }).toList();
       if (filtered.isEmpty) return Center(child: Text(players.isEmpty ? 'No squad information available' : 'No players in this category', style: const TextStyle(color: AppColors.muted)));
-      final teamA = widget.match.teamName('A', scorecard: widget.scorecard);
-      final teamB = widget.match.teamName('B', scorecard: widget.scorecard);
-      final groups = <String, List<Map<String, dynamic>>>{teamA: [], teamB: []};
-      for (final player in filtered) {
-        final label = (player['_teamLabel'] ?? player['teamName'] ?? player['team_name'] ?? player['team'] ?? '').toString().toLowerCase();
-        final goesToB = label.isNotEmpty && (label == teamB.toLowerCase() || teamB.toLowerCase().contains(label) || label.contains(teamB.toLowerCase()));
-        groups[goesToB ? teamB : teamA]!.add(player);
-      }
-      return Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Expanded(child: _squadTeamColumn(teamA, groups[teamA]!)),
-        Container(width: 1, color: AppColors.border),
-        Expanded(child: _squadTeamColumn(teamB, groups[teamB]!)),
-      ]);
+      return ListView.builder(itemCount: filtered.length, itemBuilder: (context, index) {
+        final player = filtered[index];
+        final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? 'Player').toString();
+        final role = (player['role'] ?? player['playingRole'] ?? player['playing_role'] ?? player['position'] ?? '').toString();
+        final team = (player['_teamLabel'] ?? player['teamName'] ?? player['team_name'] ?? '').toString();
+        final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
+        return Container(decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: ListTile(
+          dense: true, leading: CircleAvatar(radius: 18, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 20, color: AppColors.muted) : null),
+          title: Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          subtitle: Text([if (team.isNotEmpty) team, role.isEmpty ? 'Player' : role].join(' • '), style: const TextStyle(fontSize: 11, color: AppColors.muted)),
+        ));
+      });
     })),
   ]);
 
-  Widget _squadTeamColumn(String teamName, List<Map<String, dynamic>> players) => Column(children: [
-    Container(width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 11), decoration: const BoxDecoration(color: AppColors.surface, border: Border(bottom: BorderSide(color: AppColors.border))),
-      child: Text(teamName, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700))),
-    Expanded(child: ListView.builder(itemCount: players.length, itemBuilder: (context, index) {
-        final player = players[index];
-        final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? 'Player').toString();
-        final playingRoles = '${player['playingRoles'] ?? player['playing_roles'] ?? player['playingRole'] ?? player['playing_role'] ?? ''}'.toLowerCase();
-        final battingStyle = (player['longBattingStyles'] ?? player['long_batting_styles'] ?? '').toString();
-        final bowlingStyle = (player['longBowlingStyles'] ?? player['long_bowling_styles'] ?? '').toString();
-        final isAllRounderOrKeeper = playingRoles.contains('all') || playingRoles.contains('wk') || playingRoles.contains('wicket');
-        final style = _squadFilter == 1
-            ? battingStyle
-            : _squadFilter == 2
-                ? bowlingStyle
-                : isAllRounderOrKeeper
-                    ? [if (battingStyle.isNotEmpty) battingStyle, if (bowlingStyle.isNotEmpty) bowlingStyle].join(' • ')
-                    : [if (playingRoles.contains('bat') && battingStyle.isNotEmpty) battingStyle, if (playingRoles.contains('bowl') && bowlingStyle.isNotEmpty) bowlingStyle].join(' • ');
-        final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
-        return Container(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 5), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: Column(
-          children: [
-            Row(children: [
-              CircleAvatar(radius: 15, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 17, color: AppColors.muted) : null),
-              const SizedBox(width: 5),
-              Expanded(child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
-            ]),
-            const SizedBox(height: 3),
-            if (style.isNotEmpty) Align(alignment: Alignment.centerLeft, child: Text(style, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9, color: AppColors.muted))),
-          ],
-        ));
-      })),
-  ]);
+  String? _batsmanId(Map<String, dynamic> player) => (player['playerId'] ?? player['player_id'] ?? player['batsmanId'] ?? player['batsman_id'] ?? player['id'])?.toString();
+  String _playerName(Map<String, dynamic> player) => (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? 'Player').toString();
 
-  Widget _squadChip(String label, int index) => InkWell(onTap: () => setState(() => _squadFilter = index), child: Container(
+  Widget _batterModeChip(String label, int value) => InkWell(
+    onTap: () => setState(() {
+      _batterSubtab = value;
+      if (value == 1) _loadBatterComparison();
+    }),
+    child: Container(height: 32, alignment: Alignment.center, decoration: BoxDecoration(color: _batterSubtab == value ? const Color(0xFF292929) : AppColors.surface, border: Border.all(color: _batterSubtab == value ? AppColors.border : AppColors.border)), child: Text(label, style: TextStyle(fontSize: 11, color: _batterSubtab == value ? Colors.white : AppColors.muted))),
+  );
+
+  Widget _comparisonResults() => FutureBuilder<Object?>(future: _batterComparison, builder: (context, snapshot) {
+    if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: AppColors.acid));
+    if (snapshot.hasError) return const Center(child: Text('Could not load batter comparison', style: TextStyle(color: AppColors.muted)));
+    final rows = _comparisonRows(snapshot.data);
+    if (_selectedBatsmanId == null) return const Center(child: Text('Select a batter to view comparison', style: TextStyle(color: AppColors.muted)));
+    if (rows.isEmpty) return const Center(child: Text('No comparison data available', style: TextStyle(color: AppColors.muted)));
+    return ListView(
+      children: rows.map((row) => Container(
+        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))),
+        child: ListTile(
+          dense: true,
+          title: Text(row.$1, style: const TextStyle(fontSize: 12)),
+          subtitle: Text(_comparisonMetric == 0 ? 'Probable Dismissal Rate' : 'Probable Strike Rate', style: const TextStyle(fontSize: 10, color: AppColors.muted)),
+          trailing: Text(row.$2, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.acid)),
+        ),
+      )).toList(),
+    );
+  });
+
+  List<(String, String)> _comparisonRows(Object? data, [String? inheritedBowler]) {
+    if (data is List) {
+      return [for (final item in data) ..._comparisonRows(item, inheritedBowler)];
+    }
+    if (data is! Map) return [];
+    final map = Map<String, dynamic>.from(data);
+    final bowler = (map['playerName'] ?? map['player_name'] ?? map['bowlerName'] ?? map['bowler_name'] ?? map['bowler'] ?? map['fullName'] ?? map['name'] ?? inheritedBowler)?.toString();
+    final metricProbability = _comparisonMetric == 0
+        ? (map['probableDismissalRate'] ?? map['probable_dismissal_rate'])
+        : (map['probableStrikeRate'] ?? map['probable_strike_rate']);
+    final probability = metricProbability ?? map['probability'] ?? map['dismissalProbability'] ?? map['dismissal_probability'] ?? map['strikeRate'] ?? map['strike_rate'] ?? map['probabilityPercentage'] ?? map['percentage'] ?? map['value'];
+    if (bowler != null && probability != null && probability is! Map && probability is! List) {
+      final value = probability.toString();
+      return [(bowler, value.contains('%') ? value : '$value%')];
+    }
+    final rows = <(String, String)>[];
+    for (final key in ['data', 'results', 'bowlers', 'comparisons']) {
+      if (map[key] != null) rows.addAll(_comparisonRows(map[key], inheritedBowler));
+    }
+    if (rows.isNotEmpty) return rows;
+    for (final entry in map.entries) {
+      if (const {'code', 'message', 'squadAnnounced', 'squad_announced'}.contains(entry.key)) continue;
+      if (entry.value is Map || entry.value is List) {
+        rows.addAll(_comparisonRows(entry.value, entry.key));
+      } else if (entry.value != null && inheritedBowler == null) {
+        // Some responses encode each bowler as a map key and probability as its value.
+        final value = entry.value.toString();
+        rows.add((entry.key, value.contains('%') ? value : '$value%'));
+      }
+    }
+    return rows;
+  }
+
+  Widget _batterDropdown<T>({required T value, required List<DropdownMenuItem<T>> items, required ValueChanged<T?> onChanged}) => DropdownButtonFormField<T>(
+    initialValue: value,
+    isExpanded: true,
+    dropdownColor: AppColors.surface,
+    style: const TextStyle(color: Colors.white, fontSize: 11),
+    decoration: const InputDecoration(filled: true, fillColor: AppColors.surface, contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 5), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.border), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero)),
+    items: items,
+    onChanged: onChanged,
+  );
+
+  Widget _topBatterRow(Map<String, dynamic> player) {
+    final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? player['batsmanName'] ?? 'Player').toString();
+    final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
+    final probability = player['probability'] ?? player['percentage'] ?? player['score'] ?? player['value'] ?? player['probabilityPercentage'];
+    final display = probability == null ? '' : probability.toString().contains('%') ? probability.toString() : '$probability%';
+    return Container(decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: ListTile(
+      dense: true,
+      leading: CircleAvatar(radius: 18, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 20, color: AppColors.muted) : null),
+      title: Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+      trailing: Text(display, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+    ));
+  }
+
+  Widget _squadChip(String label, int index) => InkWell(onTap: () => setState(() {
+    _squadFilter = index;
+    if (index == 1) _loadTopBatters();
+  }), child: Container(
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
     decoration: BoxDecoration(color: _squadFilter == index ? AppColors.acid : AppColors.surface, border: Border.all(color: _squadFilter == index ? AppColors.acid : AppColors.border)),
     child: Text(label, style: TextStyle(color: _squadFilter == index ? Colors.black : AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)),
