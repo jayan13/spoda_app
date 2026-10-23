@@ -999,6 +999,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   static const _prompts = ['Top Runs?', 'Top Performer?', 'Match Winner?'];
   final _question = TextEditingController();
   int _selectedTab = 0;
+  int _statsSubtab = 0;
   int _squadFilter = 0;
   int _batterSubtab = 0;
   int _batterMetric = 0;
@@ -1016,6 +1017,40 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Future<Object?> _bowlerComparison = Future.value(null);
   late final Future<List<Map<String, dynamic>>> _players = _loadPlayers();
   late final Future<Object?> _preMatchReport = _loadMatchReport();
+  late final Future<Object?> _groundParScore = _loadGroundData('/match-ground-analysis/par-score');
+  late final Future<Object?> _groundWickets = _loadGroundData('/match-ground-analysis/wickets-per-innings');
+
+  String? _groundId() {
+    Object? find(Object? value) {
+      if (value is Map) {
+        for (final entry in value.entries) {
+          final key = entry.key.toString().toLowerCase().replaceAll(RegExp(r'[_-]'), '');
+          if (key == 'groundid' || key == 'venueid' || key == 'stadiumid') return entry.value;
+        }
+        for (final entry in value.values) { final result = find(entry); if (result != null) return result; }
+      } else if (value is List) {
+        for (final item in value) { final result = find(item); if (result != null) return result; }
+      }
+      return null;
+    }
+    return find(widget.match.raw)?.toString();
+  }
+
+  Future<Object?> _loadGroundData(String path) async {
+    final groundId = _groundId();
+    if (widget.match.matchId.isEmpty || groundId == null || groundId.isEmpty) return null;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('api.spoda.ai', path, {
+        'matchId': widget.match.matchId,
+        'groundId': groundId,
+      });
+      final response = await (await client.getUrl(uri)).close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Ground analysis returned ${response.statusCode}');
+      return jsonDecode(body);
+    } finally { client.close(force: true); }
+  }
 
   Future<Object?> _loadMatchReport() async {
     if (widget.match.matchId.isEmpty) return null;
@@ -1230,11 +1265,210 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           Expanded(child: switch (_selectedTab) {
             0 => _preMatchReportContent(),
             2 => _squadsContent(),
+            3 => _groundStatsContent(),
             _ => const SizedBox.expand(),
           }),
           _askAiSection(),
         ])),
       );
+
+  Widget _groundStatsContent() => Column(children: [
+    Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+      child: Row(children: [
+        Expanded(child: _statsSubtabChip('Ground', 0)),
+        const SizedBox(width: 8),
+        Expanded(child: _statsSubtabChip('Team', 1)),
+      ]),
+    ),
+    Expanded(child: _statsSubtab == 0 ? ListView(
+    padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
+    children: [
+      _groundCard(
+        title: 'Winning Score - First Innings',
+        subtitle: 'Average Winning Score In Innings.',
+        future: _groundParScore,
+        builder: (data) {
+          final average = _numberFor(data, const ['battingFirst', 'batting_first']);
+          final remaining = _numberFor(data, const ['remaining']);
+          final highest = average != null && remaining != null ? average + remaining : null;
+          final stadium = _groundTitle(data);
+          return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text(stadium, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 7),
+            _scoreProgress(average, highest),
+          ]);
+        },
+      ),
+      const SizedBox(height: 12),
+      _groundCard(
+        title: 'Wickets Per Innings',
+        subtitle: 'Wicket taken in phases in this ground',
+        future: _groundWickets,
+        builder: (data) => _WicketsPhaseChart(rows: _wicketPhaseRows(data), title: _groundTitle(data)),
+      ),
+    ],
+  ) : const Center(child: Text('Team analysis is not available yet.', style: TextStyle(color: AppColors.muted, fontSize: 12)))),
+  ]);
+
+  Widget _statsSubtabChip(String label, int value) => InkWell(
+    onTap: () => setState(() => _statsSubtab = value),
+    child: Container(
+      height: 34,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: _statsSubtab == value ? AppColors.acid : AppColors.surface, border: Border.all(color: _statsSubtab == value ? AppColors.acid : AppColors.border)),
+      child: Text(label, style: TextStyle(color: _statsSubtab == value ? AppColors.background : AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)),
+    ),
+  );
+
+  Widget _groundCard({required String title, required String subtitle, required Future<Object?> future, required Widget Function(Object?) builder}) => Container(
+    margin: const EdgeInsets.only(bottom: 2),
+    padding: const EdgeInsets.all(12),
+    decoration: const BoxDecoration(color: AppColors.surface, border: Border.fromBorderSide(BorderSide(color: AppColors.border))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+      const SizedBox(height: 4), Text(subtitle, style: const TextStyle(color: AppColors.muted, fontSize: 11)),
+      const SizedBox(height: 12),
+      FutureBuilder<Object?>(future: future, builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) return const SizedBox(height: 100, child: Center(child: CircularProgressIndicator(color: AppColors.acid)));
+        if (snapshot.hasError || snapshot.data == null) return const Padding(padding: EdgeInsets.symmetric(vertical: 16), child: Text('Ground stats are not available for this match.', style: TextStyle(color: AppColors.muted, fontSize: 11)));
+        return Container(width: double.infinity, padding: const EdgeInsets.all(12), color: const Color(0xFF292929), child: builder(snapshot.data));
+      }),
+    ]),
+  );
+
+  Widget _scoreValue(String label, num? value) => Column(children: [
+    Text(value == null ? '—' : value.toStringAsFixed(2).replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), ''), style: const TextStyle(color: AppColors.acid, fontSize: 18, fontWeight: FontWeight.w800)),
+    Text(label, style: const TextStyle(color: AppColors.muted, fontSize: 10)),
+  ]);
+
+  Widget _scoreProgress(num? average, num? highest) {
+    final progress = average == null || highest == null || highest <= 0 ? 0.0 : (average / highest).clamp(0, 1).toDouble();
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        _scoreValue('Average', average),
+        _scoreValue('Highest', highest),
+      ]),
+      const SizedBox(height: 10),
+      ClipRRect(borderRadius: BorderRadius.circular(10), child: LinearProgressIndicator(value: progress, minHeight: 12, backgroundColor: AppColors.border, valueColor: const AlwaysStoppedAnimation<Color>(AppColors.acid))),
+      const SizedBox(height: 4),
+      const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text('0', style: TextStyle(color: AppColors.muted, fontSize: 9)),
+        Text('Highest', style: TextStyle(color: AppColors.muted, fontSize: 9)),
+      ]),
+    ]);
+  }
+
+  num? _numberFor(Object? data, List<String> keys) {
+    final sought = keys.map((key) => key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '')).toSet();
+    Object? find(Object? value) {
+      if (value is Map) {
+        for (final entry in value.entries) {
+          if (sought.contains(entry.key.toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), ''))) return entry.value;
+        }
+        for (final entry in value.values) { final result = find(entry); if (result != null) return result; }
+      } else if (value is List) {
+        for (final item in value) { final result = find(item); if (result != null) return result; }
+      }
+      return null;
+    }
+    final value = find(data);
+    if (value is num) return value;
+    return num.tryParse(value?.toString() ?? '');
+  }
+
+  String _groundTitle(Object? data) {
+    const names = {'groundname', 'stadiumname', 'venuename', 'ground', 'venue', 'stadium', 'title'};
+    Object? find(Object? value) {
+      if (value is Map) {
+        for (final entry in value.entries) {
+          if (names.contains(entry.key.toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '')) && entry.value is String && entry.value.toString().trim().isNotEmpty) return entry.value;
+        }
+        for (final entry in value.values) { final result = find(entry); if (result != null) return result; }
+      } else if (value is List) {
+        for (final item in value) { final result = find(item); if (result != null) return result; }
+      }
+      return null;
+    }
+    final title = find(data);
+    if (title != null) return title.toString();
+    return widget.match.venue.isNotEmpty ? widget.match.venue : 'Ground';
+  }
+
+  List<_WicketPhase> _wicketPhaseRows(Object? data) {
+    final rows = <_WicketPhase>[];
+    if (data is Map) {
+      final widgets = data['widgets'];
+      if (widgets is Map) {
+        final first = _phaseValues(widgets['firstInnings']);
+        final second = _phaseValues(widgets['secondInnings']);
+        final names = <String>{...first.keys, ...second.keys};
+        if (names.isNotEmpty) {
+          const order = ['power play', 'middle', 'death', 'in 20 overs'];
+          final sorted = names.toList()..sort((a, b) {
+            final ai = order.indexOf(a.toLowerCase()), bi = order.indexOf(b.toLowerCase());
+            if (ai < 0 && bi < 0) return a.compareTo(b);
+            if (ai < 0) return 1;
+            if (bi < 0) return -1;
+            return ai.compareTo(bi);
+          });
+          return [for (final name in sorted) _WicketPhase(name, first[name] ?? 0, second[name] ?? 0)];
+        }
+      }
+    }
+    void visit(Object? value) {
+      if (value is List) { for (final item in value) { visit(item); } return; }
+      if (value is! Map) return;
+      final map = Map<String, dynamic>.from(value);
+      final phaseValue = map['phase'] ?? map['name'] ?? map['overPhase'] ?? map['over_phase'] ?? map['category'];
+      if (phaseValue != null) {
+        num? read(List<String> keys) {
+          for (final key in keys) { final raw = map[key]; if (raw is num) return raw; final parsed = num.tryParse(raw?.toString() ?? ''); if (parsed != null) return parsed; }
+          return null;
+        }
+        final first = read(['firstInning', 'first_inning', 'firstInnings', 'first_innings', 'firstInningWickets', 'first_innings_wickets', 'first', 'innings1', 'inning1']);
+        final second = read(['secondInning', 'second_inning', 'secondInnings', 'second_innings', 'secondInningWickets', 'second_innings_wickets', 'second', 'innings2', 'inning2']);
+        if (first != null || second != null) rows.add(_WicketPhase(phaseValue.toString(), first ?? 0, second ?? 0));
+      }
+      for (final entry in map.entries) { if (entry.value is Map || entry.value is List) visit(entry.value); }
+    }
+    visit(data);
+    return rows;
+  }
+
+  Map<String, num> _phaseValues(Object? innings) {
+    final values = <String, num>{};
+    if (innings is! List) return values;
+    for (final entry in innings.whereType<Map>()) {
+      final data = entry['data'];
+      if (data is! List) continue;
+      for (final item in data.whereType<Map>()) {
+        final phase = item['match']?.toString();
+        final raw = item['value'];
+        final value = raw is num ? raw : num.tryParse(raw?.toString() ?? '');
+        if (phase != null && value != null) values[phase] = value;
+      }
+    }
+    return values;
+  }
+
+  Widget _WicketsPhaseChart({required List<_WicketPhase> rows, required String title}) {
+    if (rows.isEmpty) return const SizedBox(height: 90, child: Center(child: Text('No wicket phase data available.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
+    return Column(children: [
+      Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 4),
+      const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        _ChartLegend(color: Color(0xFF5B8FF9), label: 'First Innings'), SizedBox(width: 12), _ChartLegend(color: Color(0xFF34D399), label: 'Second Innings'),
+      ]),
+      const SizedBox(height: 12),
+      SizedBox(height: 230, child: CustomPaint(size: const Size(double.infinity, 230), painter: _WicketsPainter(rows))),
+      Row(children: rows.map((row) => Expanded(child: Padding(padding: const EdgeInsets.only(top: 8), child: Column(children: [Text(row.name, textAlign: TextAlign.center, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)), Text(_phaseOvers(row.name), textAlign: TextAlign.center, style: const TextStyle(fontSize: 9, color: AppColors.muted))])))).toList()),
+    ]);
+  }
+
+  String _phaseOvers(String phase) => switch (phase.toLowerCase()) {
+    'powerplay' || 'power play' => '(0-6 Overs)', 'middle' => '(7-15 Overs)', 'death' => '(15-20 Overs)', 'total' || 'in 20 overs' => '(In 20 Overs)', _ => '',
+  };
 
   Widget _preMatchReportContent() => FutureBuilder<Object?>(
     future: _preMatchReport,
@@ -1743,6 +1977,63 @@ InputDecoration _locationDropdownDecoration() => const InputDecoration(
       enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.border), borderRadius: BorderRadius.zero),
       focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero),
     );
+
+class _WicketPhase {
+  const _WicketPhase(this.name, this.firstInnings, this.secondInnings);
+  final String name;
+  final num firstInnings;
+  final num secondInnings;
+}
+
+class _ChartLegend extends StatelessWidget {
+  const _ChartLegend({required this.color, required this.label});
+  final Color color;
+  final String label;
+  @override
+  Widget build(BuildContext context) => Row(mainAxisSize: MainAxisSize.min, children: [
+    Container(width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+    const SizedBox(width: 4), Text(label, style: const TextStyle(color: AppColors.muted, fontSize: 9)),
+  ]);
+}
+
+class _WicketsPainter extends CustomPainter {
+  _WicketsPainter(this.rows);
+  final List<_WicketPhase> rows;
+  static const _first = Color(0xFF5B8FF9);
+  static const _second = Color(0xFF34D399);
+  @override
+  void paint(Canvas canvas, Size size) {
+    const left = 28.0, right = 5.0, top = 8.0, bottom = 8.0;
+    final chartWidth = size.width - left - right;
+    final chartHeight = size.height - top - bottom;
+    final maxValue = rows.fold<num>(1, (max, row) => [max, row.firstInnings, row.secondInnings].reduce((a, b) => a > b ? a : b));
+    final maxAxis = ((maxValue / 2).ceil() * 2).clamp(2, 20).toInt();
+    final grid = Paint()..color = AppColors.border..strokeWidth = .7;
+    final textStyle = const TextStyle(color: AppColors.muted, fontSize: 9);
+    for (var tick = 0; tick <= maxAxis; tick += maxAxis <= 10 ? 1 : 2) {
+      final y = top + chartHeight - chartHeight * tick / maxAxis;
+      canvas.drawLine(Offset(left, y), Offset(size.width - right, y), grid);
+      final label = TextPainter(text: TextSpan(text: '$tick', style: textStyle), textDirection: TextDirection.ltr)..layout();
+      label.paint(canvas, Offset(left - label.width - 5, y - label.height / 2));
+    }
+    final groupWidth = chartWidth / rows.length;
+    final barWidth = (groupWidth * .28).clamp(5, 16).toDouble();
+    for (var i = 0; i < rows.length; i++) {
+      final row = rows[i];
+      final center = left + groupWidth * (i + .5);
+      for (final entry in [(row.firstInnings, _first, center - barWidth - 1), (row.secondInnings, _second, center + 1)]) {
+        final value = entry.$1.toDouble();
+        final barHeight = chartHeight * value / maxAxis;
+        final rect = Rect.fromLTWH(entry.$3, top + chartHeight - barHeight, barWidth, barHeight);
+        canvas.drawRect(rect, Paint()..color = entry.$2);
+        final label = TextPainter(text: TextSpan(text: value.toStringAsFixed(value % 1 == 0 ? 0 : 1), style: const TextStyle(color: Colors.white, fontSize: 8)), textDirection: TextDirection.ltr)..layout();
+        label.paint(canvas, Offset(rect.center.dx - label.width / 2, rect.top - label.height - 2));
+      }
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _WicketsPainter oldDelegate) => oldDelegate.rows != rows;
+}
 
 class PricingPlansPage extends StatefulWidget {
   const PricingPlansPage({super.key, required this.country, required this.state});
