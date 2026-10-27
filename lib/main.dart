@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
@@ -1000,6 +1001,12 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   final _question = TextEditingController();
   int _selectedTab = 0;
   int _statsSubtab = 0;
+  int _teamRunMatches = 5;
+  int _teamWicketMatches = 5;
+  int _teamRunPhase = 0;
+  int _teamWicketPhase = 0;
+  int _teamBoundaryMode = 0;
+  Future<Object?>? _teamAnalysis;
   int _squadFilter = 0;
   int _batterSubtab = 0;
   int _batterMetric = 0;
@@ -1017,8 +1024,53 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Future<Object?> _bowlerComparison = Future.value(null);
   late final Future<List<Map<String, dynamic>>> _players = _loadPlayers();
   late final Future<Object?> _preMatchReport = _loadMatchReport();
+  late final Future<Object?> _groundWinningPercentage = _loadGroundData('/match-ground-analysis/winning-percentage');
+  late final Future<Object?> _groundRunsByPhase = _loadGroundData('/match-ground-analysis/run-scored-in-phase');
+  late final Future<Object?> _groundEconomyByPhase = _loadGroundData('/match-ground-analysis/economy-in-phase');
+  late final Future<Object?> _groundBoundaries = _loadGroundData('/match-ground-analysis/boundaries-per-game');
   late final Future<Object?> _groundParScore = _loadGroundData('/match-ground-analysis/par-score');
   late final Future<Object?> _groundWickets = _loadGroundData('/match-ground-analysis/wickets-per-innings');
+
+  @override
+  void initState() {
+    super.initState();
+    _teamAnalysis = _loadTeamAnalysis();
+  }
+
+  String? _teamId(String side) {
+    final rawTeam = widget.match.raw['team$side'];
+    if (rawTeam is Map) {
+      for (final key in ['teamId', 'team_id', 'id', 'teamid']) {
+        final value = rawTeam[key];
+        if (value != null && value.toString().isNotEmpty) return value.toString();
+      }
+    }
+    final candidates = side == 'A'
+        ? ['teamOneId', 'team_one_id', 'team1Id', 'team1_id', 'teamAId', 'team_a_id']
+        : ['teamTwoId', 'team_two_id', 'team2Id', 'team2_id', 'teamBId', 'team_b_id'];
+    for (final key in candidates) {
+      final value = widget.match.raw[key];
+      if (value != null && value.toString().isNotEmpty) return value.toString();
+    }
+    return null;
+  }
+
+  Future<Object?> _loadTeamAnalysis() async {
+    final one = _teamId('A'), two = _teamId('B');
+    if (widget.match.matchId.isEmpty || one == null || two == null) return null;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('api.spoda.ai', '/match-team-analysis/team', {
+        'matchId': widget.match.matchId,
+        'teamOneId': one,
+        'teamTwoId': two,
+      });
+      final response = await (await client.getUrl(uri)).close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Team analysis returned ${response.statusCode}');
+      return jsonDecode(body);
+    } finally { client.close(force: true); }
+  }
 
   String? _groundId() {
     Object? find(Object? value) {
@@ -1307,9 +1359,158 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         future: _groundWickets,
         builder: (data) => _WicketsPhaseChart(rows: _wicketPhaseRows(data), title: _groundTitle(data)),
       ),
+      const SizedBox(height: 12),
+      _groundCard(
+        title: 'Win Percentage',
+        subtitle: 'Percentage of wins batting first and second',
+        future: _groundWinningPercentage,
+        builder: (data) {
+          final (first, second) = _winningPercentages(data);
+          return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text(_groundTitle(data), textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 7),
+            const Text('Win Percentage', textAlign: TextAlign.center, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 7),
+            _winningPercentageBar(first, second),
+          ]);
+        },
+      ),
+      const SizedBox(height: 12),
+      _groundCard(
+        title: 'Run Scored In Phases',
+        subtitle: 'Average runs scored while batting in this ground divide in phases',
+        future: _groundRunsByPhase,
+        builder: (data) => _RunsPhaseChart(rows: _runsPhaseRows(data), title: _groundTitle(data)),
+      ),
+      const SizedBox(height: 12),
+      _groundCard(
+        title: 'Economy In Phases',
+        subtitle: 'Economy in different phases of the game',
+        future: _groundEconomyByPhase,
+        builder: (data) => _EconomyPhaseChart(rows: _runsPhaseRows(data), title: _groundTitle(data)),
+      ),
+      const SizedBox(height: 12),
+      _groundCard(
+        title: 'Boundaries In Phase',
+        subtitle: 'Boundaries in different phases of the game',
+        future: _groundBoundaries,
+        builder: (data) => _BoundariesChart(rows: _boundaryRows(data), title: _groundTitle(data)),
+      ),
     ],
-  ) : const Center(child: Text('Team analysis is not available yet.', style: TextStyle(color: AppColors.muted, fontSize: 12)))),
+    ) : ListView(padding: const EdgeInsets.fromLTRB(12, 12, 12, 16), children: [
+      _teamChartCard(title: 'Runs By Phases', subtitle: 'Runs scored while batting in phases.', matches: _teamRunMatches, onMatches: (value) => setState(() => _teamRunMatches = value), metric: 'runs'),
+      const SizedBox(height: 12),
+      _teamChartCard(title: 'Wicket Taken', subtitle: 'Wicket taken while bowling in phases.', matches: _teamWicketMatches, onMatches: (value) => setState(() => _teamWicketMatches = value), metric: 'wickets'),
+      const SizedBox(height: 12),
+      _teamBoundaryCard(),
+    ])),
   ]);
+
+  Widget _teamChartCard({required String title, required String subtitle, required int matches, required ValueChanged<int> onMatches, required String metric}) => Container(
+    padding: const EdgeInsets.all(12), decoration: const BoxDecoration(color: AppColors.surface, border: Border.fromBorderSide(BorderSide(color: AppColors.border))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)), const SizedBox(width: 6), const Icon(Icons.info_outline, size: 16)]),
+      const SizedBox(height: 4), Text(subtitle, style: const TextStyle(color: AppColors.muted, fontSize: 11)),
+      const SizedBox(height: 12), _matchRangeSelector(matches, onMatches), const SizedBox(height: 12),
+      Row(
+        children: ['Powerplay', 'Middle Over', 'Death Over'].asMap().entries.map((entry) => Expanded(
+          child: InkWell(
+            onTap: () => setState(() { if (metric == 'runs') { _teamRunPhase = entry.key; } else { _teamWicketPhase = entry.key; } }),
+            child: Row(children: [
+              Icon(((metric == 'runs' ? _teamRunPhase : _teamWicketPhase) == entry.key) ? Icons.radio_button_checked : Icons.radio_button_unchecked, size: 14, color: AppColors.muted),
+              const SizedBox(width: 4),
+              Flexible(child: Text(entry.value, style: const TextStyle(color: AppColors.muted, fontSize: 10), overflow: TextOverflow.ellipsis)),
+            ]),
+          ),
+        )).toList(),
+      ),
+      const SizedBox(height: 12),
+      FutureBuilder<Object?>(future: _teamAnalysis, builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) return const SizedBox(height: 300, child: Center(child: CircularProgressIndicator(color: AppColors.acid)));
+        if (snapshot.hasError || snapshot.data == null) return const SizedBox(height: 120, child: Center(child: Text('Team stats are not available for this match.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
+        final phase = metric == 'runs' ? _teamRunPhase : _teamWicketPhase;
+        final teams = _teamMetricRows(snapshot.data, metric, matches, phase);
+        return _TeamLineChart(teams: teams, metric: metric == 'runs' ? 'Runs' : 'Wickets', xAxis: 'Last $matches matches (Latest on the left)');
+      }),
+    ]),
+  );
+
+  Widget _matchRangeSelector(int selected, ValueChanged<int> onChanged) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10), decoration: BoxDecoration(border: Border.all(color: AppColors.border)),
+    child: DropdownButtonHideUnderline(child: DropdownButton<int>(value: selected, isDense: true, dropdownColor: AppColors.surface, style: const TextStyle(color: Colors.white, fontSize: 12), items: const [5, 10, 20].map((n) => DropdownMenuItem(value: n, child: Text('Last $n Matches'))).toList(), onChanged: (v) { if (v != null) onChanged(v); })),
+  );
+
+  Widget _teamBoundaryCard() => Container(
+    padding: const EdgeInsets.all(12), decoration: const BoxDecoration(color: AppColors.surface, border: Border.fromBorderSide(BorderSide(color: AppColors.border))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: const [Text('Boundaries Percentage', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)), SizedBox(width: 6), Icon(Icons.info_outline, size: 16)]),
+      const SizedBox(height: 4), const Text('Percentage of runs in boundaries for each team', style: TextStyle(color: AppColors.muted, fontSize: 11)),
+      const SizedBox(height: 12), Row(children: [for (final entry in ['Batting', 'Bowling'].asMap().entries) Expanded(child: InkWell(onTap: () => setState(() => _teamBoundaryMode = entry.key), child: Row(children: [Icon(_teamBoundaryMode == entry.key ? Icons.radio_button_checked : Icons.radio_button_unchecked, size: 15, color: AppColors.muted), const SizedBox(width: 5), Text(entry.value, style: const TextStyle(color: AppColors.muted, fontSize: 11))])))]),
+      const SizedBox(height: 12), FutureBuilder<Object?>(future: _teamAnalysis, builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) return const SizedBox(height: 180, child: Center(child: CircularProgressIndicator(color: AppColors.acid)));
+        if (snapshot.hasError || snapshot.data == null) return const SizedBox(height: 90, child: Center(child: Text('Team stats are not available for this match.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
+        return _TeamBoundaryChart(teams: _teamBoundaryRows(snapshot.data, _teamBoundaryMode == 0));
+      }),
+    ]),
+  );
+
+  Map? _teamWidget(Object? data, String widgetName) {
+    if (data is! Map) return null;
+    final widgets = data['value'];
+    if (widgets is! List) return null;
+    for (final item in widgets.whereType<Map>()) {
+      if (item['widgetName'] == widgetName && item['widgets'] is Map) return item['widgets'] as Map;
+    }
+    return null;
+  }
+
+  List<_TeamSeries> _teamMetricRows(Object? data, String metric, int count, int phase) {
+    final widgetName = metric == 'runs' ? 'team_average_run_scored' : 'team_wickets_taken';
+    final section = _teamWidget(data, widgetName);
+    if (section == null) return const [];
+    final rangeKey = 'Last_${count}_matches';
+    final range = section[rangeKey];
+    if (range is! Map) return const [];
+    final phaseKey = const ['powerPlay', 'middleOver', 'deathOver'][phase.clamp(0, 2).toInt()];
+    final phaseRows = range[phaseKey];
+    if (phaseRows is! List || phaseRows.isEmpty || phaseRows.first is! Map) return const [];
+    final rows = (phaseRows.first as Map)['data'];
+    if (rows is! List) return const [];
+    final teamNames = <String>{};
+    for (final row in rows.whereType<Map>()) {
+      for (final entry in row.entries) {
+        if (entry.key.toString() != 'match' && entry.value is num) teamNames.add(entry.key.toString());
+      }
+    }
+    return [
+      for (final team in teamNames)
+        _TeamSeries(team, [for (final row in rows.whereType<Map>()) if (row[team] is num) row[team] as num]),
+    ];
+  }
+
+  List<_TeamBoundary> _teamBoundaryRows(Object? data, bool batting) {
+    final section = _teamWidget(data, 'team_boundaries_percentage');
+    final rows = section?[batting ? 'Batting' : 'Bowling'];
+    if (rows is! List) return const [];
+    num valueFor(List data, RegExp pattern) {
+      for (final item in data.whereType<Map>()) {
+        if (pattern.hasMatch(item['match']?.toString() ?? '')) {
+          final value = item['value'];
+          return value is num ? value : num.tryParse(value?.toString() ?? '') ?? 0;
+        }
+      }
+      return 0;
+    }
+    return [
+      for (final item in rows.whereType<Map>())
+        if (item['title'] != null && item['data'] is List)
+          _TeamBoundary(
+            item['title'].toString(),
+            valueFor(item['data'] as List, RegExp(r"4(?:'|’)?s", caseSensitive: false)),
+            valueFor(item['data'] as List, RegExp(r"6(?:'|’)?s", caseSensitive: false)),
+          ),
+    ];
+  }
 
   Widget _statsSubtabChip(String label, int value) => InkWell(
     onTap: () => setState(() => _statsSubtab = value),
@@ -1355,6 +1556,74 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
         Text('0', style: TextStyle(color: AppColors.muted, fontSize: 9)),
         Text('Highest', style: TextStyle(color: AppColors.muted, fontSize: 9)),
+      ]),
+    ]);
+  }
+
+  (num?, num?) _winningPercentages(Object? data) {
+    num? first;
+    num? second;
+    num? parse(Object? value) => value is num ? value : num.tryParse(value?.toString() ?? '');
+    void visit(Object? value) {
+      if (value is Map) {
+        final normalized = <String, Object?>{
+          for (final entry in value.entries)
+            entry.key.toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), ''): entry.value,
+        };
+        if (normalized.containsKey('battingfirst')) first ??= parse(normalized['battingfirst']);
+        if (normalized.containsKey('battingsecond')) second ??= parse(normalized['battingsecond']);
+        final label = (normalized['match'] ?? normalized['label'] ?? normalized['name'] ?? normalized['innings'])?.toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+        if (label == 'battingfirst' || label == 'firstinnings') first ??= parse(normalized['value'] ?? normalized['percentage'] ?? normalized['winpercentage']);
+        if (label == 'battingsecond' || label == 'secondinnings') second ??= parse(normalized['value'] ?? normalized['percentage'] ?? normalized['winpercentage']);
+        for (final entry in value.entries) {
+          visit(entry.value);
+        }
+      } else if (value is List) {
+        for (final item in value) {
+          visit(item);
+        }
+      }
+    }
+    visit(data);
+    return (first, second);
+  }
+
+  Widget _winningPercentageBar(num? first, num? second) {
+    final firstValue = (first ?? 0).clamp(0, 100).toDouble();
+    final secondValue = (second ?? 0).clamp(0, 100).toDouble();
+    final total = firstValue + secondValue;
+    final firstFraction = total == 0 ? .5 : firstValue / total;
+    final secondFraction = total == 0 ? .5 : secondValue / total;
+    String label(num? value) => value == null ? '—%' : '${value.toStringAsFixed(0)}%';
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text(label(first), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+        Text(label(second), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+      ]),
+      const SizedBox(height: 6),
+      SizedBox(
+        width: double.infinity,
+        height: 12,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Row(
+            children: [
+              Expanded(
+                flex: (firstFraction * 1000).round().clamp(1, 1000).toInt(),
+                child: const SizedBox.expand(child: ColoredBox(color: Color(0xFF38C985))),
+              ),
+              Expanded(
+                flex: (secondFraction * 1000).round().clamp(1, 1000).toInt(),
+                child: const SizedBox.expand(child: ColoredBox(color: Color(0xFF2863A5))),
+              ),
+            ],
+          ),
+        ),
+      ),
+      const SizedBox(height: 5),
+      const Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text('Batting First', style: TextStyle(fontSize: 9)),
+        Text('Batting Second', style: TextStyle(fontSize: 9)),
       ]),
     ]);
   }
@@ -1436,6 +1705,44 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return rows;
   }
 
+  List<_RunsPhase> _runsPhaseRows(Object? data) {
+    if (data is! Map || data['widgets'] is! Map) return const [];
+    final widgets = data['widgets'] as Map;
+    final first = _phaseValues(widgets['firstInnings']);
+    final second = _phaseValues(widgets['secondInnings']);
+    const order = ['power play', 'middle', 'death', 'in 20 overs'];
+    final names = <String>{...first.keys, ...second.keys}.toList()
+      ..sort((a, b) {
+        final ai = order.indexOf(a.toLowerCase()), bi = order.indexOf(b.toLowerCase());
+        if (ai < 0 && bi < 0) return a.compareTo(b);
+        if (ai < 0) return 1;
+        if (bi < 0) return -1;
+        return ai.compareTo(bi);
+      });
+    return [for (final name in names) _RunsPhase(name, first[name] ?? 0, second[name] ?? 0)];
+  }
+
+  List<_BoundaryValues> _boundaryRows(Object? data) {
+    if (data is! Map || data['widgets'] is! Map) return const [];
+    final widgets = data['widgets'] as Map;
+    Map<String, num> values(Object? innings) {
+      final raw = _phaseValues(innings);
+      final normalized = <String, num>{};
+      for (final entry in raw.entries) {
+        normalized[entry.key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '')] = entry.value;
+      }
+      final fours = normalized['4s'] ?? normalized['fours'] ?? normalized['four'] ?? 0;
+      final sixes = normalized['6s'] ?? normalized['sixes'] ?? normalized['six'] ?? 0;
+      return {'fours': fours, 'sixes': sixes};
+    }
+    final first = values(widgets['firstInnings']);
+    final second = values(widgets['secondInnings']);
+    return [
+      _BoundaryValues('First Innings', first['fours'] ?? 0, first['sixes'] ?? 0),
+      _BoundaryValues('Second Innings', second['fours'] ?? 0, second['sixes'] ?? 0),
+    ];
+  }
+
   Map<String, num> _phaseValues(Object? innings) {
     final values = <String, num>{};
     if (innings is! List) return values;
@@ -1463,6 +1770,60 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       const SizedBox(height: 12),
       SizedBox(height: 230, child: CustomPaint(size: const Size(double.infinity, 230), painter: _WicketsPainter(rows))),
       Row(children: rows.map((row) => Expanded(child: Padding(padding: const EdgeInsets.only(top: 8), child: Column(children: [Text(row.name, textAlign: TextAlign.center, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)), Text(_phaseOvers(row.name), textAlign: TextAlign.center, style: const TextStyle(fontSize: 9, color: AppColors.muted))])))).toList()),
+    ]);
+  }
+
+  Widget _RunsPhaseChart({required List<_RunsPhase> rows, required String title}) {
+    if (rows.isEmpty) return const SizedBox(height: 90, child: Center(child: Text('No run phase data available.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
+    return Column(children: [
+      Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 8),
+      const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        _ChartLegend(color: Color(0xFF5B8FF9), label: 'First Innings'), SizedBox(width: 12), _ChartLegend(color: Color(0xFF34D399), label: 'Second Innings'),
+      ]),
+      const SizedBox(height: 8),
+      SizedBox(height: 270, child: CustomPaint(size: const Size(double.infinity, 270), painter: _RunsPhasePainter(rows))),
+    ]);
+  }
+
+  Widget _EconomyPhaseChart({required List<_RunsPhase> rows, required String title}) {
+    if (rows.isEmpty) return const SizedBox(height: 90, child: Center(child: Text('No economy phase data available.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
+    return Column(children: [
+      Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 8),
+      const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        _ChartLegend(color: Color(0xFF5B8FF9), label: 'First Innings'), SizedBox(width: 12), _ChartLegend(color: Color(0xFF34D399), label: 'Second Innings'),
+      ]),
+      const SizedBox(height: 8),
+      SizedBox(height: 250, child: CustomPaint(size: const Size(double.infinity, 250), painter: _EconomyPhasePainter(rows))),
+    ]);
+  }
+
+  Widget _BoundariesChart({required List<_BoundaryValues> rows, required String title}) {
+    if (rows.isEmpty) return const SizedBox(height: 90, child: Center(child: Text('No boundary data available.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
+    return Column(children: [
+      Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 8),
+      const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        _ChartLegend(color: Color(0xFF5B8FF9), label: 'First Innings'), SizedBox(width: 12), _ChartLegend(color: Color(0xFF34D399), label: 'Second Innings'),
+      ]),
+      const SizedBox(height: 14),
+      Row(children: rows.map((row) => Expanded(child: Column(children: [
+        Text(row.innings, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        SizedBox(height: 126, child: Center(child: SizedBox(width: 126, height: 126, child: Stack(alignment: Alignment.center, children: [
+          CustomPaint(size: const Size(126, 126), painter: _BoundaryDonutPainter(row.fours, row.sixes)),
+          Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Total', style: TextStyle(fontSize: 9)),
+            const Text('Boundaries', style: TextStyle(fontSize: 9)),
+            Text((row.fours + row.sixes).toStringAsFixed(2), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+          ]),
+        ])))),
+        const SizedBox(height: 8),
+        _BoundaryLegend(color: _BoundaryDonutPainter.foursColor, label: 'Fours ${row.fours.toStringAsFixed(2)}'),
+        const SizedBox(height: 4),
+        _BoundaryLegend(color: _BoundaryDonutPainter.sixesColor, label: 'Sixes ${row.sixes.toStringAsFixed(2)}'),
+      ]))).toList()),
     ]);
   }
 
@@ -1985,6 +2346,115 @@ class _WicketPhase {
   final num secondInnings;
 }
 
+class _RunsPhase {
+  const _RunsPhase(this.name, this.firstInnings, this.secondInnings);
+  final String name;
+  final num firstInnings;
+  final num secondInnings;
+}
+
+class _BoundaryValues {
+  const _BoundaryValues(this.innings, this.fours, this.sixes);
+  final String innings;
+  final num fours;
+  final num sixes;
+}
+
+class _TeamSeries {
+  const _TeamSeries(this.name, this.values);
+  final String name;
+  final List<num> values;
+}
+
+class _TeamBoundary {
+  const _TeamBoundary(this.name, this.fours, this.sixes);
+  final String name;
+  final num fours, sixes;
+}
+
+class _TeamLineChart extends StatelessWidget {
+  const _TeamLineChart({required this.teams, required this.metric, required this.xAxis});
+  final List<_TeamSeries> teams;
+  final String metric;
+  final String xAxis;
+  @override
+  Widget build(BuildContext context) {
+    if (teams.isEmpty || teams.every((team) => team.values.isEmpty)) return const SizedBox(height: 220, child: Center(child: Text('No team trend data available.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
+    final colors = [const Color(0xFF5B8FF9), const Color(0xFF34D399)];
+    return Column(children: [
+      Row(mainAxisAlignment: MainAxisAlignment.center, children: [for (var i = 0; i < teams.length; i++) Padding(padding: const EdgeInsets.symmetric(horizontal: 5), child: _ChartLegend(color: colors[i % colors.length], label: teams[i].name))]),
+      const SizedBox(height: 8),
+      Row(children: [
+        RotatedBox(quarterTurns: 3, child: Text(metric, style: const TextStyle(fontSize: 9, color: AppColors.muted))),
+        Expanded(child: SizedBox(height: 255, child: CustomPaint(painter: _TeamLinePainter(teams, metric, colors)))),
+      ]),
+      Text(xAxis, style: const TextStyle(fontSize: 10, color: AppColors.muted)),
+    ]);
+  }
+}
+
+class _TeamLinePainter extends CustomPainter {
+  _TeamLinePainter(this.teams, this.metric, this.colors);
+  final List<_TeamSeries> teams;
+  final String metric;
+  final List<Color> colors;
+  @override
+  void paint(Canvas canvas, Size size) {
+    const left = 30.0, right = 6.0, top = 10.0, bottom = 28.0;
+    final values = teams.expand((e) => e.values).toList();
+    if (values.isEmpty) return;
+    final max = (values.fold<num>(0, (a, b) => a > b ? a : b) * 1.15).clamp(1, double.infinity).toDouble();
+    final w = size.width - left - right, h = size.height - top - bottom;
+    final grid = Paint()..color = AppColors.border..strokeWidth = .6;
+    for (var tick = 0; tick <= 4; tick++) {
+      final y = top + h * (1 - tick / 4);
+      canvas.drawLine(Offset(left, y), Offset(size.width - right, y), grid);
+      final tp = TextPainter(text: TextSpan(text: (max * tick / 4).toStringAsFixed(0), style: const TextStyle(color: AppColors.muted, fontSize: 8)), textDirection: TextDirection.ltr)..layout();
+      tp.paint(canvas, Offset(left - tp.width - 4, y - tp.height / 2));
+    }
+    final count = teams.fold<int>(0, (n, team) => n > team.values.length ? n : team.values.length);
+    for (var i = 0; i < count; i++) {
+      final x = left + (count <= 1 ? w / 2 : w * i / (count - 1));
+      final label = TextPainter(text: TextSpan(text: 'M${i + 1}', style: const TextStyle(color: AppColors.muted, fontSize: 8)), textDirection: TextDirection.ltr)..layout();
+      label.paint(canvas, Offset(x - label.width / 2, size.height - 14));
+    }
+    for (var ti = 0; ti < teams.length; ti++) {
+      final points = <Offset>[];
+      for (var i = 0; i < teams[ti].values.length; i++) {
+        final x = left + (count <= 1 ? w / 2 : w * i / (count - 1));
+        points.add(Offset(x, top + h * (1 - teams[ti].values[i].toDouble() / max)));
+      }
+      final path = Path();
+      for (var i = 0; i < points.length; i++) { if (i == 0) path.moveTo(points[i].dx, points[i].dy); else path.lineTo(points[i].dx, points[i].dy); }
+      canvas.drawPath(path, Paint()..color = colors[ti % colors.length]..style = PaintingStyle.stroke..strokeWidth = 2.2);
+      for (final p in points) { canvas.drawCircle(p, 2.2, Paint()..color = colors[ti % colors.length]); }
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _TeamLinePainter old) => old.teams != teams || old.metric != metric;
+}
+
+class _TeamBoundaryChart extends StatelessWidget {
+  const _TeamBoundaryChart({required this.teams});
+  final List<_TeamBoundary> teams;
+  @override
+  Widget build(BuildContext context) {
+    if (teams.isEmpty) return const SizedBox(height: 120, child: Center(child: Text('No boundary percentage data available.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
+    return Row(children: [for (final team in teams) Expanded(child: Column(children: [Text(team.name, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)), const SizedBox(height: 6), SizedBox(width: 126, height: 126, child: Stack(alignment: Alignment.center, children: [CustomPaint(size: const Size(126, 126), painter: _BoundaryDonutPainter(team.fours, team.sixes)), Column(mainAxisSize: MainAxisSize.min, children: [const Text('Total', style: TextStyle(fontSize: 9)), const Text('Percentage', style: TextStyle(fontSize: 9)), Text('${(team.fours + team.sixes).toStringAsFixed(2)}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700))])])), const SizedBox(height: 6), _BoundaryLegend(color: _BoundaryDonutPainter.foursColor, label: 'Fours ${team.fours}'), _BoundaryLegend(color: _BoundaryDonutPainter.sixesColor, label: 'Sixes ${team.sixes}')]))]);
+  }
+}
+
+class _BoundaryLegend extends StatelessWidget {
+  const _BoundaryLegend({required this.color, required this.label});
+  final Color color;
+  final String label;
+  @override
+  Widget build(BuildContext context) => Row(mainAxisSize: MainAxisSize.min, children: [
+    Container(width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+    const SizedBox(width: 4), Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.muted, fontSize: 9))),
+  ]);
+}
+
 class _ChartLegend extends StatelessWidget {
   const _ChartLegend({required this.color, required this.label});
   final Color color;
@@ -2033,6 +2503,185 @@ class _WicketsPainter extends CustomPainter {
   }
   @override
   bool shouldRepaint(covariant _WicketsPainter oldDelegate) => oldDelegate.rows != rows;
+}
+
+class _RunsPhasePainter extends CustomPainter {
+  _RunsPhasePainter(this.rows);
+  final List<_RunsPhase> rows;
+  static const _first = Color(0xFF5B8FF9);
+  static const _second = Color(0xFF34D399);
+
+  double _rate(_RunsPhase row, num value) => value.toDouble() / (row.name.toLowerCase().contains('20 overs') ? 20 : 10);
+  String _valueLabel(num value) => value.toStringAsFixed(value % 1 == 0 ? 0 : 2);
+  String _phaseLabel(String name) => switch (name.toLowerCase()) {
+    'powerplay' || 'power play' => 'Powerplay',
+    'middle' => 'Middle',
+    'death' => 'Death',
+    'total' || 'in 20 overs' => 'Total',
+    _ => name,
+  };
+  String _overs(String name) => switch (name.toLowerCase()) {
+    'powerplay' || 'power play' => '(0-6 Overs)',
+    'middle' => '(7-15 Overs)',
+    'death' => '(15-20 Overs)',
+    'total' || 'in 20 overs' => '(In 20 Overs)',
+    _ => '',
+  };
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const left = 30.0, right = 8.0, top = 18.0, bottom = 42.0;
+    final width = size.width - left - right;
+    final height = size.height - top - bottom;
+    final highest = rows.fold<double>(1, (max, row) => [max, _rate(row, row.firstInnings), _rate(row, row.secondInnings)].reduce((a, b) => a > b ? a : b));
+    final maxAxis = (((highest.ceil() + 1) / 2).ceil() * 2).clamp(2, 20).toInt();
+    final grid = Paint()..color = AppColors.border..strokeWidth = .7;
+    const axisText = TextStyle(color: AppColors.muted, fontSize: 9);
+    for (var tick = 0; tick <= maxAxis; tick++) {
+      final y = top + height - height * tick / maxAxis;
+      canvas.drawLine(Offset(left, y), Offset(size.width - right, y), grid);
+      final label = TextPainter(text: TextSpan(text: '$tick', style: axisText), textDirection: TextDirection.ltr)..layout();
+      label.paint(canvas, Offset(left - label.width - 6, y - label.height / 2));
+    }
+    canvas.drawLine(Offset(left, top), Offset(left, top + height), Paint()..color = AppColors.border..strokeWidth = 1);
+    canvas.drawLine(Offset(left, top + height), Offset(size.width - right, top + height), Paint()..color = AppColors.border..strokeWidth = 1);
+    final axis = TextPainter(text: const TextSpan(text: 'Runs', style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)), textDirection: TextDirection.ltr)..layout();
+    canvas.save();
+    canvas.translate(8, top + height / 2 + axis.width / 2);
+    canvas.rotate(-math.pi / 2);
+    axis.paint(canvas, Offset.zero);
+    canvas.restore();
+
+    List<Offset> pointsFor(bool first) => [
+      for (var i = 0; i < rows.length; i++) Offset(
+        left + (rows.length == 1 ? width / 2 : width * i / (rows.length - 1)),
+        top + height - height * (_rate(rows[i], first ? rows[i].firstInnings : rows[i].secondInnings).clamp(0, maxAxis).toDouble()) / maxAxis,
+      ),
+    ];
+    void drawSeries(bool isFirst, Color color) {
+      final points = pointsFor(isFirst);
+      final path = Path()..moveTo(points.first.dx, points.first.dy);
+      for (var i = 0; i < points.length - 1; i++) {
+        final midpoint = (points[i].dx + points[i + 1].dx) / 2;
+        path.cubicTo(midpoint, points[i].dy, midpoint, points[i + 1].dy, points[i + 1].dx, points[i + 1].dy);
+      }
+      canvas.drawPath(path, Paint()..color = color..style = PaintingStyle.stroke..strokeWidth = 2..strokeCap = StrokeCap.round);
+      for (var i = 0; i < points.length; i++) {
+        final point = points[i];
+        canvas.drawCircle(point, 2.5, Paint()..color = color);
+        final raw = isFirst ? rows[i].firstInnings : rows[i].secondInnings;
+        final label = TextPainter(text: TextSpan(text: _valueLabel(raw), style: const TextStyle(color: Colors.white, fontSize: 8)), textDirection: TextDirection.ltr)..layout();
+        final offset = Offset(point.dx - label.width / 2, point.dy + (isFirst ? -label.height - 5 : 5));
+        label.paint(canvas, offset);
+      }
+    }
+    drawSeries(true, _first);
+    drawSeries(false, _second);
+    for (var i = 0; i < rows.length; i++) {
+      final x = left + (rows.length == 1 ? width / 2 : width * i / (rows.length - 1));
+      final title = TextPainter(text: TextSpan(text: _phaseLabel(rows[i].name), style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)), textDirection: TextDirection.ltr, textAlign: TextAlign.center)..layout(maxWidth: width / rows.length);
+      title.paint(canvas, Offset(x - title.width / 2, top + height + 7));
+      final overs = TextPainter(text: TextSpan(text: _overs(rows[i].name), style: axisText), textDirection: TextDirection.ltr, textAlign: TextAlign.center)..layout(maxWidth: width / rows.length);
+      overs.paint(canvas, Offset(x - overs.width / 2, top + height + 20));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RunsPhasePainter oldDelegate) => oldDelegate.rows != rows;
+}
+
+class _EconomyPhasePainter extends CustomPainter {
+  _EconomyPhasePainter(this.rows);
+  final List<_RunsPhase> rows;
+  static const _first = Color(0xFF5B8FF9);
+  static const _second = Color(0xFF34D399);
+  static const _axisText = TextStyle(color: AppColors.muted, fontSize: 9);
+
+  String _phaseLabel(String name) => switch (name.toLowerCase()) {
+    'powerplay' || 'power play' => 'Powerplay',
+    'middle' => 'Middle',
+    'death' => 'Death',
+    _ => name,
+  };
+  String _overs(String name) => switch (name.toLowerCase()) {
+    'powerplay' || 'power play' => '(0-6 Overs)',
+    'middle' => '(7-15 Overs)',
+    'death' => '(15-20 Overs)',
+    _ => '',
+  };
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const left = 28.0, right = 6.0, top = 14.0, bottom = 39.0;
+    const maxAxis = 10.0;
+    final width = size.width - left - right;
+    final height = size.height - top - bottom;
+    final grid = Paint()..color = AppColors.border..strokeWidth = .7;
+    for (var tick = 0; tick <= maxAxis; tick++) {
+      final y = top + height - height * tick / maxAxis;
+      canvas.drawLine(Offset(left, y), Offset(size.width - right, y), grid);
+      final label = TextPainter(text: TextSpan(text: '$tick', style: _axisText), textDirection: TextDirection.ltr)..layout();
+      label.paint(canvas, Offset(left - label.width - 5, y - label.height / 2));
+    }
+    canvas.drawLine(Offset(left, top + height), Offset(size.width - right, top + height), Paint()..color = AppColors.border..strokeWidth = 1);
+    final axis = TextPainter(text: const TextSpan(text: 'Runs', style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)), textDirection: TextDirection.ltr)..layout();
+    canvas.save();
+    canvas.translate(7, top + height / 2 + axis.width / 2);
+    canvas.rotate(-math.pi / 2);
+    axis.paint(canvas, Offset.zero);
+    canvas.restore();
+
+    final groupWidth = width / rows.length;
+    final barWidth = (groupWidth * .17).clamp(5, 14).toDouble();
+    for (var i = 0; i < rows.length; i++) {
+      final row = rows[i];
+      final center = left + groupWidth * (i + .5);
+      for (final entry in [(row.firstInnings, _first, center - barWidth - 1), (row.secondInnings, _second, center + 1)]) {
+        final value = entry.$1.toDouble();
+        final barHeight = height * value.clamp(0, maxAxis).toDouble() / maxAxis;
+        final rect = Rect.fromLTWH(entry.$3, top + height - barHeight, barWidth, barHeight);
+        canvas.drawRect(rect, Paint()..color = entry.$2);
+        final label = TextPainter(text: TextSpan(text: value.toStringAsFixed(2), style: const TextStyle(color: Colors.white, fontSize: 7)), textDirection: TextDirection.ltr)..layout();
+        label.paint(canvas, Offset(rect.center.dx - label.width / 2, rect.top - label.height - 2));
+      }
+      final title = TextPainter(text: TextSpan(text: _phaseLabel(row.name), style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)), textDirection: TextDirection.ltr, textAlign: TextAlign.center)..layout(maxWidth: groupWidth);
+      title.paint(canvas, Offset(center - title.width / 2, top + height + 7));
+      final overs = TextPainter(text: TextSpan(text: _overs(row.name), style: _axisText), textDirection: TextDirection.ltr, textAlign: TextAlign.center)..layout(maxWidth: groupWidth);
+      overs.paint(canvas, Offset(center - overs.width / 2, top + height + 20));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _EconomyPhasePainter oldDelegate) => oldDelegate.rows != rows;
+}
+
+class _BoundaryDonutPainter extends CustomPainter {
+  const _BoundaryDonutPainter(this.fours, this.sixes);
+  final num fours;
+  final num sixes;
+  static const foursColor = Color(0xFF34D399);
+  static const sixesColor = Color(0xFF5B8FF9);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    const strokeWidth = 26.0;
+    final radius = (size.shortestSide - strokeWidth) / 2;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+    final foursValue = fours.toDouble();
+    final sixesValue = sixes.toDouble();
+    final total = foursValue + sixesValue;
+    final background = Paint()..color = AppColors.border..style = PaintingStyle.stroke..strokeWidth = strokeWidth;
+    canvas.drawCircle(center, radius, background);
+    if (total <= 0) return;
+    final foursSweep = math.pi * 2 * foursValue / total;
+    final style = Paint()..style = PaintingStyle.stroke..strokeWidth = strokeWidth..strokeCap = StrokeCap.butt;
+    canvas.drawArc(rect, -math.pi / 2, foursSweep, false, style..color = foursColor);
+    canvas.drawArc(rect, -math.pi / 2 + foursSweep, math.pi * 2 - foursSweep, false, style..color = sixesColor);
+  }
+
+  @override
+  bool shouldRepaint(covariant _BoundaryDonutPainter oldDelegate) => oldDelegate.fours != fours || oldDelegate.sixes != sixes;
 }
 
 class PricingPlansPage extends StatefulWidget {
