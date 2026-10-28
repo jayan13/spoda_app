@@ -1046,8 +1046,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       }
     }
     final candidates = side == 'A'
-        ? ['teamOneId', 'team_one_id', 'team1Id', 'team1_id', 'teamAId', 'team_a_id']
-        : ['teamTwoId', 'team_two_id', 'team2Id', 'team2_id', 'teamBId', 'team_b_id'];
+        ? ['teamOneId', 'team_one_id', 'team1Id', 'team1_id', 'teamId1', 'team_id1', 'teamAId', 'team_a_id']
+        : ['teamTwoId', 'team_two_id', 'team2Id', 'team2_id', 'teamId2', 'team_id2', 'teamBId', 'team_b_id'];
     for (final key in candidates) {
       final value = widget.match.raw[key];
       if (value != null && value.toString().isNotEmpty) return value.toString();
@@ -1065,6 +1065,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         'teamOneId': one,
         'teamTwoId': two,
       });
+      
       final response = await (await client.getUrl(uri)).close();
       final body = await response.transform(utf8.decoder).join();
       if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Team analysis returned ${response.statusCode}');
@@ -1455,8 +1456,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   );
 
   Map? _teamWidget(Object? data, String widgetName) {
-    if (data is! Map) return null;
-    final widgets = data['value'];
+    final widgets = data is List ? data : data is Map ? data['value'] : null;
     if (widgets is! List) return null;
     for (final item in widgets.whereType<Map>()) {
       if (item['widgetName'] == widgetName && item['widgets'] is Map) return item['widgets'] as Map;
