@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'auth_service.dart';
@@ -32,7 +33,7 @@ class SpodaApp extends StatelessWidget {
           brightness: Brightness.dark,
           scaffoldBackgroundColor: AppColors.background,
           colorScheme: const ColorScheme.dark(primary: AppColors.acid, surface: AppColors.surface),
-          fontFamily: 'Arial',
+          fontFamily: 'Roboto',
           switchTheme: SwitchThemeData(
             thumbColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.selected) ? AppColors.background : AppColors.muted),
             trackColor: WidgetStateProperty.resolveWith((states) => states.contains(WidgetState.selected) ? AppColors.acid : AppColors.border),
@@ -191,16 +192,18 @@ class _FeatureList extends StatelessWidget { const _FeatureList(); @override Wid
 class _Feature extends StatelessWidget { const _Feature(this.image, this.title, this.caption); final String image, title, caption; @override Widget build(BuildContext context) => Container(width: double.infinity, padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Row(children: [Image.asset(image, width: 32, height: 32, fit: BoxFit.contain), const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: const TextStyle(fontWeight: FontWeight.bold)), Text(caption, style: const TextStyle(color: AppColors.muted, fontSize: 11))]))])); }
 
 class _LoginPanel extends StatelessWidget {
-  const _LoginPanel();
+  const _LoginPanel({this.isLogin = false});
+
+  final bool isLogin;
 
   @override
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Lets get started', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w800)),
-          const Text('with Spoda AI', style: TextStyle(fontSize: 25, color: AppColors.acid, fontWeight: FontWeight.w800)),
+          Text(isLogin ? 'Welcome back' : 'Lets get started', style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w800)),
+          Text(isLogin ? 'to Spoda AI' : 'with Spoda AI', style: const TextStyle(fontSize: 25, color: AppColors.acid, fontWeight: FontWeight.w800)),
           const SizedBox(height: 10),
-          const Text('Create your account and unlock a smarter cricket experience.', style: TextStyle(color: AppColors.muted)),
+          Text(isLogin ? 'Log in to continue to your cricket insights.' : 'Create your account and unlock a smarter cricket experience.', style: const TextStyle(color: AppColors.muted)),
           const SizedBox(height: 26),
           _SocialLoginButton(label: 'Continue with Google', asset: 'assets/google.png', onPressed: () => _startSocialLogin(context, 'google')),
           const SizedBox(height: 9),
@@ -210,17 +213,33 @@ class _LoginPanel extends StatelessWidget {
           const SizedBox(height: 14),
           const Center(child: Text('By continuing, you agree to the Terms of Service\nand acknowledge our Privacy Policy.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 10))),
           const Spacer(),
-          Center(child: RichText(text: TextSpan(style: const TextStyle(color: AppColors.muted, fontSize: 12), children: [
-            const TextSpan(text: 'Already a member?  '),
-            WidgetSpan(child: GestureDetector(onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const EmailLoginPage())), child: const Text('Log in', style: TextStyle(color: AppColors.acid, fontWeight: FontWeight.w600)))),
-          ]))),
-          const SizedBox(height: 8),
+          if (!isLogin) ...[
+            Center(child: RichText(text: TextSpan(style: const TextStyle(color: AppColors.muted, fontSize: 12), children: [
+              const TextSpan(text: 'Already a member?  '),
+              WidgetSpan(child: GestureDetector(onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const EmailLoginPage())), child: const Text('Log in', style: TextStyle(color: AppColors.acid, fontWeight: FontWeight.w600)))),
+            ]))),
+            const SizedBox(height: 8),
+          ],
           Center(child: RichText(text: TextSpan(style: const TextStyle(color: AppColors.muted, fontSize: 12), children: [
             const TextSpan(text: 'New to Spoda?  '),
-            WidgetSpan(child: GestureDetector(onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CreateAccountPage())), child: const Text('Create an account', style: TextStyle(color: AppColors.acid, fontWeight: FontWeight.w600)))),
+            WidgetSpan(child: GestureDetector(onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CreateAccountPage())), child: Text(isLogin ? 'Register' : 'Create an account', style: const TextStyle(color: AppColors.acid, fontWeight: FontWeight.w600)))),
           ]))),
           const SizedBox(height: 12),
         ]),
+      );
+}
+
+class LoginPage extends StatelessWidget {
+  const LoginPage({super.key});
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(
+          backgroundColor: AppColors.background,
+          title: const Text('Log In'),
+          leading: IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.arrow_back)),
+        ),
+        body: SafeArea(child: _LoginPanel(isLogin: true)),
       );
 }
 
@@ -537,10 +556,47 @@ class MatchData {
   String teamName(String suffix, {Map<String, dynamic>? scorecard}) {
     final scorecardTeam = _scorecardTeam(scorecard, suffix);
     if (scorecardTeam?['short_name'] != null && scorecardTeam!['short_name'].toString().isNotEmpty) return scorecardTeam['short_name'].toString();
-    if (scorecardTeam?['name'] != null) return scorecardTeam!['name'].toString();
+    if (scorecardTeam?['name'] != null && scorecardTeam!['name'].toString().isNotEmpty) return scorecardTeam['name'].toString();
     final value = raw['team$suffix'];
     if (value is Map) return (value['shortName'] ?? value['short_name'] ?? value['name'] ?? 'Team $suffix').toString();
     return (raw['teamName$suffix'] ?? raw['team$suffix Name'] ?? 'Team $suffix').toString();
+  }
+  String teamScore(String suffix, {Map<String, dynamic>? scorecard}) {
+    final value = _scorecardTeam(scorecard, suffix)?['scores_full'];
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    if (value is num) return value.toString();
+    return 'Yet to bat';
+  }
+  String scoreFrom(Map<String, dynamic>? scorecard) {
+    final value = _findScorecardValue(scorecard, 'scores_full');
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    if (value is List) return value.map((item) => item.toString()).where((item) => item.trim().isNotEmpty).join('\n');
+    if (value is Map) return value.values.map((item) => item.toString()).where((item) => item.trim().isNotEmpty).join('\n');
+    return score;
+  }
+  String seriesName(Map<String, dynamic>? scorecard) {
+    final rootName = scorecard?['name'];
+    if (rootName is String && rootName.trim().isNotEmpty) return rootName.trim();
+    final data = scorecard?['data'];
+    if (data is Map && data['name'] is String && (data['name'] as String).trim().isNotEmpty) return (data['name'] as String).trim();
+    return tournament;
+  }
+  Object? _findScorecardValue(Object? value, String key) {
+    if (value is Map) {
+      for (final entry in value.entries) {
+        if (entry.key.toString().toLowerCase() == key.toLowerCase()) return entry.value;
+      }
+      for (final child in value.values) {
+        final found = _findScorecardValue(child, key);
+        if (found != null) return found;
+      }
+    } else if (value is List) {
+      for (final child in value) {
+        final found = _findScorecardValue(child, key);
+        if (found != null) return found;
+      }
+    }
+    return null;
   }
   String? teamFlag(String suffix, {Map<String, dynamic>? scorecard}) {
     final scorecardTeam = _scorecardTeam(scorecard, suffix);
@@ -619,6 +675,7 @@ class _HomePageState extends State<HomePage> {
   late Future<List<MatchData>> _matches = _loadMatches();
   late Future<List<BlogPost>> _posts = _loadPosts(4, 1);
   final Map<String, Future<Map<String, dynamic>?>> _scorecardRequests = {};
+  final Set<int> _savedPostIds = {};
   Future<List<BlogPost>> _loadPosts(int count, int page) async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
     try {
@@ -692,9 +749,26 @@ class _HomePageState extends State<HomePage> {
   }
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(backgroundColor: AppColors.background, title: const Text('SPODA', style: TextStyle(color: AppColors.acid, fontWeight: FontWeight.w900, letterSpacing: 2)), centerTitle: true, leading: IconButton(onPressed: _openMenu, icon: const Icon(Icons.menu, color: AppColors.acid))),
+    appBar: AppBar(backgroundColor: AppColors.background, title: Image.asset('assets/logo_spoda.png', height: 32, fit: BoxFit.contain), centerTitle: true, leading: IconButton(onPressed: _openMenu, icon: const Icon(Icons.menu, color: AppColors.acid))),
     body: _tab == 0 ? _homeDashboard() : _tab == 1 ? _matchPage() : _tab == 2 ? BlogListPage(preloaded: _posts) : const Center(child: Text('Profile')),
-    bottomNavigationBar: NavigationBar(backgroundColor: AppColors.surface, indicatorColor: Colors.transparent, selectedIndex: _tab, onDestinationSelected: (i) => setState(() => _tab = i), destinations: const [NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'), NavigationDestination(icon: Icon(Icons.emoji_events_outlined), selectedIcon: Icon(Icons.emoji_events), label: 'Matches'), NavigationDestination(icon: Icon(Icons.newspaper_outlined), selectedIcon: Icon(Icons.newspaper), label: 'Blogs & News'), NavigationDestination(icon: Icon(Icons.account_circle_outlined), selectedIcon: Icon(Icons.account_circle), label: 'Profile')]),
+    bottomNavigationBar: NavigationBarTheme(
+      data: NavigationBarThemeData(
+        iconTheme: WidgetStateProperty.resolveWith<IconThemeData?>((states) =>
+            IconThemeData(color: states.contains(WidgetState.selected) ? const Color(0xFFE7FF00) : AppColors.muted)),
+      ),
+      child: NavigationBar(
+        backgroundColor: AppColors.surface,
+        indicatorColor: Colors.transparent,
+        selectedIndex: _tab,
+        onDestinationSelected: (i) => setState(() => _tab = i),
+      destinations: const [
+        NavigationDestination(icon: Icon(Icons.home_outlined), label: 'Home'),
+        NavigationDestination(icon: Icon(Icons.emoji_events_outlined), label: 'Matches'),
+        NavigationDestination(icon: Icon(Icons.newspaper_outlined), label: 'Blogs & News'),
+        NavigationDestination(icon: Icon(Icons.account_circle_outlined), label: 'Profile'),
+      ],
+      ),
+    ),
   );
   Widget _homeDashboard() => FutureBuilder<List<MatchData>>(
     future: _matches,
@@ -708,7 +782,7 @@ class _HomePageState extends State<HomePage> {
             _liveSlider(_ordered((matchSnapshot.data ?? []).where((m) => m.group == 'live' || m.group == 'today' || _isLive(m)).toList())),
           const SizedBox(height: 24), _sectionHeader('Upcoming', () => setState(() { _tab = 1; _matchStatus = 1; })),
           if (matchSnapshot.connectionState == ConnectionState.waiting) const SizedBox(height: 100, child: Center(child: CircularProgressIndicator(color: AppColors.acid)))
-          else ..._ordered((matchSnapshot.data ?? []).where((m) => m.group == 'tomorrow' && !_isDone(m)).toList()).take(3).map(_upcomingCard),
+          else ..._ordered((matchSnapshot.data ?? []).where((m) => !_isLive(m) && !_isDone(m) && (m.startDate == null || m.startDate!.isAfter(DateTime.now()))).toList()).map(_upcomingCard),
           const SizedBox(height: 16), _sectionHeader('News and Blogs', () => setState(() => _tab = 2)),
           if (postSnapshot.connectionState == ConnectionState.waiting) const SizedBox(height: 120, child: Center(child: CircularProgressIndicator(color: AppColors.acid)))
           else if (postSnapshot.hasError) TextButton(onPressed: () => setState(() => _posts = _loadPosts(4, 1)), child: const Text('Could not load posts. Tap to retry.'))
@@ -727,26 +801,166 @@ class _HomePageState extends State<HomePage> {
         final cards = <(MatchData, Map<String, dynamic>?)>[];
         for (var i = 0; i < matches.length; i++) {
           final scorecard = snapshot.data != null && i < snapshot.data!.length ? snapshot.data![i] : null;
-          if (scorecard == null ? _isLive(matches[i]) : _containsLiveStatus(scorecard)) cards.add((matches[i], scorecard));
+          if (_isLive(matches[i]) || (scorecard != null && _containsLiveStatus(scorecard))) cards.add((matches[i], scorecard));
         }
         if (cards.isEmpty) return const SizedBox.shrink();
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _sectionHeader('Live Matches', () => setState(() { _tab = 1; _matchStatus = 0; })),
-          SizedBox(height: 295, child: PageView.builder(itemCount: cards.length, controller: PageController(viewportFraction: .96), itemBuilder: (context, i) => _LiveMatchCard(match: cards[i].$1, live: true, scorecard: cards[i].$2))),
+          SizedBox(height: 295, child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: cards.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 10),
+            itemBuilder: (context, i) => SizedBox(
+              width: MediaQuery.sizeOf(context).width * .82,
+              child: _LiveMatchCard(
+                match: cards[i].$1,
+                live: true,
+                scorecard: cards[i].$2,
+                onTap: () => _openMatchDetails(cards[i].$1, cards[i].$2),
+              ),
+            ),
+          )),
           const SizedBox(height: 8),
         ]);
       },
     );
   }
-  Widget _upcomingCard(MatchData match) => FutureBuilder<Map<String, dynamic>?>(future: _loadScorecard(match), builder: (context, snapshot) => _upcomingCardContent(match, snapshot.data));
+  Widget _upcomingCard(MatchData match) => FutureBuilder<Map<String, dynamic>?>(future: _loadScorecard(match), builder: (context, snapshot) => _upcomingCardAligned(match, snapshot.data));
+  Widget _upcomingCardAligned(MatchData match, Map<String, dynamic>? scorecard) => InkWell(
+        onTap: () => _openMatchDetails(match, scorecard),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)),
+          child: Column(children: [
+            Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(match.tournament.toUpperCase(), style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(child: _alignedUpcomingTeam(match, 'A', scorecard)),
+                const Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('vs', style: TextStyle(color: AppColors.muted))),
+                Expanded(child: _alignedUpcomingTeam(match, 'B', scorecard)),
+                const SizedBox(width: 12), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12),
+                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 11))]),
+              ]),
+            ])),
+            Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [
+              Expanded(child: Text(_isLive(match) ? 'Live match updates and score' : _isDone(match) ? 'Match result and scorecard available' : 'Match prediction and insights available', style: const TextStyle(fontSize: 12, color: Colors.white70))),
+              TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: Text(_isLive(match) ? 'Live Match' : _isDone(match) ? 'Scorecard' : 'Prediction', style: const TextStyle(fontWeight: FontWeight.bold))),
+            ])),
+          ]),
+        ),
+      );
+  Widget _alignedUpcomingTeam(MatchData match, String side, Map<String, dynamic>? scorecard) {
+    final right = side == 'B';
+    final logo = _teamBadge(match, side, scorecard);
+    return Row(mainAxisAlignment: right ? MainAxisAlignment.end : MainAxisAlignment.start, children: [
+      if (!right) ...[logo, const SizedBox(width: 5)],
+      Flexible(child: Text(match.teamName(side, scorecard: scorecard), textAlign: right ? TextAlign.right : TextAlign.left, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
+      if (right) ...[const SizedBox(width: 5), logo],
+    ]);
+  }
   void _openMatchDetails(MatchData match, [Map<String, dynamic>? scorecard]) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MatchDetailPage(match: match, scorecard: scorecard)));
-  Widget _upcomingCardContent(MatchData match, Map<String, dynamic>? scorecard) => Container(margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Column(children: [Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(match.tournament.toUpperCase(), style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(height: 12), Row(children: [Expanded(child: Row(children: [_teamBadge(match, 'A', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('A', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700))), const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('vs', style: TextStyle(color: AppColors.muted))), _teamBadge(match, 'B', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('B', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)))])), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), const Text('Tomorrow', style: TextStyle(color: AppColors.muted, fontSize: 11))])])])), Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [const Expanded(child: Text('•  Match prediction and insights available', style: TextStyle(fontSize: 12, color: Colors.white70))), TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: const Text('Prediction  ›', style: TextStyle(fontWeight: FontWeight.bold)))]) )]));
+  Widget _upcomingCardContent(MatchData match, Map<String, dynamic>? scorecard) => InkWell(
+        onTap: () => _openMatchDetails(match, scorecard),
+        child: Container(margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Column(children: [Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(match.tournament.toUpperCase(), style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(height: 12), Row(children: [Expanded(child: Row(children: [_teamBadge(match, 'A', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('A', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700))), const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('vs', style: TextStyle(color: AppColors.muted))), _teamBadge(match, 'B', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('B', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)))])), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 11))])])])), Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [const Expanded(child: Text('•  Match prediction and insights available', style: TextStyle(fontSize: 12, color: Colors.white70))), TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: const Text('Prediction  ›', style: TextStyle(fontWeight: FontWeight.bold)))]) )])));
+  String _dateLabel(MatchData match) {
+    final date = match.startDate?.toLocal();
+    if (date == null) return 'Upcoming';
+    final now = DateTime.now();
+    if (date.year == now.year && date.month == now.month && date.day == now.day) return 'Today';
+    final tomorrow = now.add(const Duration(days: 1));
+    if (date.year == tomorrow.year && date.month == tomorrow.month && date.day == tomorrow.day) return 'Tomorrow';
+    return '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
+  }
   List<Widget> _blogPreviews(List<BlogPost> posts) { if (posts.isEmpty) return [const Text('No posts found.', style: TextStyle(color: AppColors.muted))]; return [if (posts.isNotEmpty) _featuredPost(posts.first), ...posts.skip(1).map((post) => _postTile(post))]; }
-  Widget _featuredPost(BlogPost post) => InkWell(onTap: () => _showPost(post), child: Container(height: 220, margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(border: Border.all(color: AppColors.border), image: post.image.isEmpty ? null : DecorationImage(image: NetworkImage(post.image), fit: BoxFit.cover, onError: (_, _) {})), child: Container(padding: const EdgeInsets.all(16), decoration: const BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.black12, Colors.black87], stops: [.12, 1])), child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.end, children: [const Text('▣ Blogs', style: TextStyle(color: Colors.greenAccent)), const SizedBox(height: 8), Text(post.title, maxLines: 2, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), const SizedBox(height: 6), Text(post.excerpt, maxLines: 2, style: const TextStyle(fontSize: 12, color: Colors.white70)), const SizedBox(height: 8), const Text('◷  8 min read  ·  Latest', style: TextStyle(color: AppColors.muted, fontSize: 11))]))));
-  Widget _postTile(BlogPost post) => InkWell(onTap: () => _showPost(post), child: Container(height: 154, margin: const EdgeInsets.only(bottom: 10), padding: const EdgeInsets.all(11), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Row(children: [if (post.image.isNotEmpty) ClipRRect(child: Image.network(post.image, width: 96, height: 130, fit: BoxFit.cover, errorBuilder: (_, _, _) => Container(width: 96, height: 130, color: AppColors.border, child: const Icon(Icons.image)))), const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [const Text('▣ Blogs', style: TextStyle(color: Colors.greenAccent, fontSize: 12)), const SizedBox(height: 7), Text(post.title, maxLines: 2, style: const TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 6), Text(post.excerpt, maxLines: 2, style: const TextStyle(color: AppColors.muted, fontSize: 12))]))])));
+  Widget _featuredPost(BlogPost post) => InkWell(
+        onTap: () => _showPost(post),
+        child: Container(
+          height: 220,
+          margin: const EdgeInsets.only(bottom: 18),
+          decoration: BoxDecoration(
+            border: Border.all(color: AppColors.border),
+            image: post.image.isEmpty ? null : DecorationImage(image: NetworkImage(post.image), fit: BoxFit.cover, onError: (_, _) {}),
+          ),
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0x66000000), Color(0x14000000), Color(0xF0000000)],
+                stops: [0, .35, 1],
+              ),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              _blogBadge(),
+              const Spacer(),
+              Text(post.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 6),
+              Text(post.excerpt, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+              const SizedBox(height: 12),
+              Row(children: [
+                const Icon(Icons.access_time_outlined, size: 16, color: AppColors.muted),
+                const SizedBox(width: 8),
+                const Text('8 min read', style: TextStyle(color: AppColors.muted, fontSize: 11)),
+                const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('·', style: TextStyle(color: AppColors.muted))),
+                Text(_timeAgo(post.publishedAt), style: const TextStyle(color: AppColors.muted, fontSize: 11)),
+              ]),
+            ]),
+          ),
+        ),
+      );
+
+  Widget _postTile(BlogPost post) => InkWell(
+        onTap: () => _showPost(post),
+        child: Container(
+          height: 184,
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(11),
+          decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)),
+          child: Row(children: [
+            if (post.image.isNotEmpty)
+              ClipRRect(
+                child: Image.network(post.image, width: 110, height: 160, fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => Container(width: 110, height: 160, color: AppColors.border, child: const Icon(Icons.image))),
+              ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [_blogBadge(), const Spacer(), Text(_timeAgo(post.publishedAt), style: const TextStyle(color: AppColors.muted, fontSize: 10))]),
+                const SizedBox(height: 6),
+                Text(post.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Text(post.excerpt, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+                const Spacer(),
+                Align(alignment: Alignment.centerRight, child: _savePostButton(post)),
+              ]),
+            ),
+          ]),
+        ),
+      );
+
+  Widget _blogBadge() => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: const BoxDecoration(color: Color(0x99102A20)),
+        child: const Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.menu_book_outlined, size: 16, color: Color(0xFF46C68A)),
+          SizedBox(width: 6),
+          Text('Blogs', style: TextStyle(color: Color(0xFF46C68A), fontSize: 13, fontWeight: FontWeight.w600)),
+        ]),
+      );
+
+  Widget _savePostButton(BlogPost post) => InkWell(
+        onTap: () => setState(() { _savedPostIds.contains(post.id) ? _savedPostIds.remove(post.id) : _savedPostIds.add(post.id); }),
+        child: Padding(
+          padding: const EdgeInsets.all(2),
+          child: Icon(_savedPostIds.contains(post.id) ? Icons.bookmark : Icons.bookmark_border, size: 18,
+              color: _savedPostIds.contains(post.id) ? AppColors.acid : AppColors.muted),
+        ),
+      );
   void _showPost(BlogPost post) => showDialog<void>(context: context, builder: (context) => Dialog(backgroundColor: AppColors.surface, child: SizedBox(height: MediaQuery.sizeOf(context).height * .8, child: Column(children: [if (post.image.isNotEmpty) Image.network(post.image, height: 200, width: double.infinity, fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()), Padding(padding: const EdgeInsets.all(16), child: Text(post.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20))), Expanded(child: SingleChildScrollView(padding: const EdgeInsets.symmetric(horizontal: 16), child: Text(post.content))), TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))]))));
   String _timeFor(MatchData m) { final d = m.startDate?.toLocal(); if (d == null) return '04:00 PM'; final hour = d.hour % 12 == 0 ? 12 : d.hour % 12; return '${hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')} ${d.hour >= 12 ? 'PM' : 'AM'}'; }
-  Widget _teamBadge(MatchData match, String suffix, [Map<String, dynamic>? scorecard]) { final url = match.teamFlag(suffix, scorecard: scorecard); return url == null || url.isEmpty ? const SizedBox.shrink() : ClipOval(child: Image.network(url, width: 22, height: 22, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.flag, size: 18, color: AppColors.muted))); }
+  Widget _teamBadge(MatchData match, String suffix, [Map<String, dynamic>? scorecard]) { final url = match.teamFlag(suffix, scorecard: scorecard); return url == null || url.isEmpty ? const Icon(Icons.shield, size: 24, color: AppColors.muted) : ClipOval(child: Image.network(url, width: 24, height: 24, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 24, color: AppColors.muted))); }
   Widget _matchPage() => Column(
         children: [
           SizedBox(
@@ -790,7 +1004,8 @@ class _HomePageState extends State<HomePage> {
                 if (snapshot.hasError) {
                   return _empty('Could not load matches. Check your connection and try again.', retry: true);
                 }
-                final matches = _filtered(snapshot.data ?? []);
+                final filteredMatches = _filtered(snapshot.data ?? []);
+                final matches = _matchStatus == 1 ? _ordered(filteredMatches) : filteredMatches;
                 if (matches.isEmpty) {
                   final noMatchesAtAll = snapshot.data?.isEmpty ?? true;
                   return _empty(noMatchesAtAll ? 'No matches are available right now.' : 'No matches in this category.');
@@ -805,7 +1020,10 @@ class _HomePageState extends State<HomePage> {
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
                     children: [
-                      ...matches.map((m) => FutureBuilder<Map<String, dynamic>?>(future: _loadScorecard(m), builder: (context, scorecard) => _MatchCard(match: m, live: _isLive(m), showPrediction: !_isDone(m), scorecard: scorecard.data, onTap: () => _openMatchDetails(m, scorecard.data)))),
+                      ...matches.map((m) => FutureBuilder<Map<String, dynamic>?>(
+                        future: _loadScorecard(m),
+                        builder: (context, scorecard) => _upcomingCardAligned(m, scorecard.data),
+                      )),
                     ],
                   ),
                 );
@@ -819,8 +1037,10 @@ class _HomePageState extends State<HomePage> {
 }
 
 class BlogPost {
-  const BlogPost({required this.title, required this.excerpt, required this.content, required this.image});
+  const BlogPost({required this.id, required this.title, required this.excerpt, required this.content, required this.image, required this.publishedAt});
+  final int id;
   final String title, excerpt, content, image;
+  final DateTime? publishedAt;
 
   factory BlogPost.fromJson(Map<String, dynamic> json) {
     String clean(Object? value) => value is Map
@@ -831,12 +1051,26 @@ class BlogPost {
         ? (embedded['wp:featuredmedia'] as List).first
         : null;
     return BlogPost(
+      id: int.tryParse('${json['id']}') ?? 0,
       title: clean(json['title']),
       excerpt: clean(json['excerpt']),
       content: clean(json['content']),
       image: (json['thumbnailUrl'] ?? (media is Map ? media['source_url'] : null) ?? '').toString(),
+      publishedAt: DateTime.tryParse('${json['date_gmt'] ?? json['date'] ?? ''}')?.toUtc(),
     );
   }
+}
+
+String _timeAgo(DateTime? publishedAt) {
+  if (publishedAt == null) return 'Date unavailable';
+  final elapsed = DateTime.now().toUtc().difference(publishedAt.toUtc());
+  if (elapsed.isNegative || elapsed.inMinutes < 1) return 'Just now';
+  if (elapsed.inHours < 1) return '${elapsed.inMinutes}m ago';
+  if (elapsed.inDays < 1) return '${elapsed.inHours}h ago';
+  if (elapsed.inDays < 7) return '${elapsed.inDays}d ago';
+  if (elapsed.inDays < 30) return '${elapsed.inDays ~/ 7}w ago';
+  if (elapsed.inDays < 365) return '${elapsed.inDays ~/ 30}mo ago';
+  return '${elapsed.inDays ~/ 365}y ago';
 }
 
 class BlogListPage extends StatefulWidget {
@@ -848,6 +1082,7 @@ class BlogListPage extends StatefulWidget {
 class _BlogListPageState extends State<BlogListPage> {
   final _scroll = ScrollController();
   final List<BlogPost> _posts = [];
+  final Set<int> _savedPostIds = {};
   var _loading = true;
   var _hasMore = true;
   var _page = 1;
@@ -906,19 +1141,210 @@ class _BlogListPageState extends State<BlogListPage> {
       final post = _posts[index];
       return InkWell(
         onTap: () => showDialog<void>(context: context, builder: (context) => Dialog(backgroundColor: AppColors.surface, child: SizedBox(height: MediaQuery.sizeOf(context).height * .82, child: Column(children: [if (post.image.isNotEmpty) Image.network(post.image, height: 200, width: double.infinity, fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()), Padding(padding: const EdgeInsets.all(16), child: Text(post.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20))), Expanded(child: SingleChildScrollView(padding: const EdgeInsets.all(16), child: Text(post.content))), TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))])))),
-        child: Container(height: 160, margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Row(children: [if (post.image.isNotEmpty) Image.network(post.image, width: 110, height: 135, fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox(width: 110, child: Icon(Icons.image))), const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [const Text('▣ Blogs', style: TextStyle(color: Colors.greenAccent)), const SizedBox(height: 8), Text(post.title, maxLines: 2, style: const TextStyle(fontWeight: FontWeight.bold)), const SizedBox(height: 6), Text(post.excerpt, maxLines: 3, style: const TextStyle(color: AppColors.muted, fontSize: 12))]))])),
+        child: Container(
+          height: 184,
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(11),
+          decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)),
+          child: Row(children: [
+            if (post.image.isNotEmpty)
+              ClipRRect(
+                child: Image.network(post.image, width: 110, height: 160, fit: BoxFit.cover,
+                    errorBuilder: (_, _, _) => Container(width: 110, height: 160, color: AppColors.border, child: const Icon(Icons.image))),
+              ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: const BoxDecoration(color: Color(0x99102A20)),
+                    child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.menu_book_outlined, size: 16, color: Color(0xFF46C68A)),
+                      SizedBox(width: 6),
+                      Text('Blogs', style: TextStyle(color: Color(0xFF46C68A), fontSize: 13, fontWeight: FontWeight.w600)),
+                    ]),
+                  ),
+                  const Spacer(),
+                  Text(_timeAgo(post.publishedAt), style: const TextStyle(color: AppColors.muted, fontSize: 10)),
+                ]),
+                const SizedBox(height: 6),
+                Text(post.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Text(post.excerpt, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+                const Spacer(),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: InkWell(
+                    onTap: () => setState(() { _savedPostIds.contains(post.id) ? _savedPostIds.remove(post.id) : _savedPostIds.add(post.id); }),
+                    child: Padding(
+                      padding: const EdgeInsets.all(2),
+                      child: Icon(_savedPostIds.contains(post.id) ? Icons.bookmark : Icons.bookmark_border, size: 18,
+                          color: _savedPostIds.contains(post.id) ? AppColors.acid : AppColors.muted),
+                    ),
+                  ),
+                ),
+              ]),
+            ),
+          ]),
+        ),
       );
     },
   );
 }
 
-class _LiveMatchCard extends StatelessWidget {
-  const _LiveMatchCard({required this.match, required this.live, this.scorecard});
+class _LiveMatchCard extends StatefulWidget {
+  const _LiveMatchCard({required this.match, required this.live, required this.onTap, this.scorecard});
   final MatchData match;
   final bool live;
+  final VoidCallback onTap;
   final Map<String, dynamic>? scorecard;
-  @override Widget build(BuildContext context) => Container(margin: const EdgeInsets.only(right: 10, bottom: 4), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: const Color(0xFF090909), border: Border.all(color: AppColors.acid)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [Icon(Icons.circle, size: 8, color: live ? AppColors.red : AppColors.muted), const SizedBox(width: 6), Text(live ? 'LIVE' : match.status.toUpperCase(), style: const TextStyle(color: AppColors.red, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(width: 12), Expanded(child: Text('[${match.tournament.toUpperCase()}]', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)))]), const Divider(color: AppColors.border), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [_team(match, 'A'), const Text('VS', style: TextStyle(color: AppColors.muted)), _team(match, 'B')]), const Spacer(), Container(width: double.infinity, padding: const EdgeInsets.all(10), color: AppColors.surface, child: Text(match.score.isEmpty ? 'Live match updates and insights' : match.score, style: const TextStyle(color: AppColors.acid, fontSize: 13))), const SizedBox(height: 10), const Center(child: Text('View Full Prediction →', style: TextStyle(fontWeight: FontWeight.bold)))]));
-  Widget _team(MatchData match, String side) => Row(mainAxisSize: MainAxisSize.min, children: [if (match.teamFlag(side, scorecard: scorecard) != null && match.teamFlag(side, scorecard: scorecard)!.isNotEmpty) ClipOval(child: Image.network(match.teamFlag(side, scorecard: scorecard)!, width: 22, height: 22, errorBuilder: (_, _, _) => const SizedBox.shrink())), const SizedBox(width: 5), Text(match.teamName(side, scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold))]);
+  @override
+  State<_LiveMatchCard> createState() => _LiveMatchCardState();
+}
+
+class _LiveMatchCardState extends State<_LiveMatchCard> {
+  static const _storage = FlutterSecureStorage();
+  Timer? _timer;
+  String? _momentum;
+  bool _loading = true;
+  @override
+  void initState() { super.initState(); _refresh(); _timer = Timer.periodic(const Duration(minutes: 5), (_) => _refresh()); }
+  @override
+  void didUpdateWidget(covariant _LiveMatchCard oldWidget) { super.didUpdateWidget(oldWidget); if (oldWidget.match.matchId != widget.match.matchId) _refresh(); }
+  @override
+  void dispose() { _timer?.cancel(); super.dispose(); }
+
+  Future<void> _refresh() async {
+    final id = widget.match.matchId;
+    if (id.isEmpty) { if (mounted) setState(() => _loading = false); return; }
+    try {
+      final key = 'match_win_probability_$id';
+      final previous = await _storage.read(key: key);
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+      Map<String, dynamic>? response;
+      try {
+        final request = await client.getUrl(Uri.parse('https://www.spoda.ai/api/overend-predictions?matchId=${Uri.encodeQueryComponent(id)}'));
+        request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+        final result = await request.close();
+        if (result.statusCode >= 200 && result.statusCode < 300) {
+          final data = jsonDecode(await result.transform(utf8.decoder).join());
+          if (data is Map) response = Map<String, dynamic>.from(data);
+        }
+      } finally { client.close(force: true); }
+      if (response == null) return;
+      final current = _extract(response)..sort((a, b) => b.value.compareTo(a.value));
+      if (current.isEmpty) return;
+      final old = previous == null ? <String, double>{} : _extract(jsonDecode(previous)).fold<Map<String, double>>({}, (map, item) => map..[item.key.toLowerCase()] = item.value);
+      final leader = current.first;
+      final oldValue = old[leader.key.toLowerCase()];
+      final delta = oldValue == null ? null : leader.value - oldValue;
+      final pct = (delta ?? leader.value).toStringAsFixed((delta ?? leader.value) % 1 == 0 ? 0 : 1);
+      final message = delta == null
+          ? '${leader.key} — $pct% chance of winning'
+          : delta > 0
+              ? '${leader.key} chances of winning have been increased by $pct%'
+              : delta < 0
+                  ? '${leader.key} chances of winning have decreased by ${delta.abs().toStringAsFixed(delta.abs() % 1 == 0 ? 0 : 1)}%'
+                  : '${leader.key} — ${leader.value.toStringAsFixed(0)}% chance of winning';
+      await _storage.write(key: key, value: jsonEncode(response));
+      if (mounted) setState(() { _momentum = message; _loading = false; });
+    } catch (_) { if (mounted) setState(() => _loading = false); }
+  }
+
+  List<MapEntry<String, double>> _extract(Object? input) {
+    Object? value;
+    void find(Object? node) {
+      if (value != null) return;
+      if (node is Map) {
+        for (final entry in node.entries) { if (entry.key.toString().toLowerCase() == 'win_probability') { value = entry.value; return; } }
+        for (final child in node.values) { find(child); if (value != null) return; }
+      } else if (node is List) { for (final child in node) { find(child); if (value != null) return; } }
+    }
+    find(input);
+    final found = <MapEntry<String, double>>[];
+    double? number(Object? x) {
+      if (x is num) return x.toDouble();
+      if (x is String) return double.tryParse(x.replaceAll('%', '').trim());
+      return null;
+    }
+    String team(String? label) {
+      final normalized = label?.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '') ?? '';
+      if (normalized == 'teama' || normalized == 'team1' || normalized == 'a') return widget.match.teamName('A', scorecard: widget.scorecard);
+      if (normalized == 'teamb' || normalized == 'team2' || normalized == 'b') return widget.match.teamName('B', scorecard: widget.scorecard);
+      return label?.trim().isNotEmpty == true ? label!.trim() : '';
+    }
+    void walk(Object? node, [String? hint]) {
+      if (node is List) { for (var i = 0; i < node.length; i++) { walk(node[i], hint ?? (i == 0 ? 'A' : i == 1 ? 'B' : null)); } return; }
+      if (node is Map) {
+        final p = number(node['probability']);
+        if (p != null) {
+          final name = team((node['team_name'] ?? node['teamName'] ?? node['short_name'] ?? node['name'] ?? node['team'] ?? hint)?.toString());
+          if (name.isNotEmpty) found.add(MapEntry(name, p <= 1 ? p * 100 : p));
+        }
+        for (final entry in node.entries) { if (entry.key.toString().toLowerCase() != 'probability') walk(entry.value, entry.key.toString()); }
+      } else {
+        final p = number(node); final name = team(hint);
+        if (p != null && name.isNotEmpty) found.add(MapEntry(name, p <= 1 ? p * 100 : p));
+      }
+    }
+    walk(value);
+    return found;
+  }
+
+  @override
+  Widget build(BuildContext context) => _LiveMatchCardView(match: widget.match, live: widget.live, onTap: widget.onTap, scorecard: widget.scorecard, momentum: _momentum ?? (_loading ? 'Loading win probability…' : 'Win probability is currently unavailable.'));
+}
+
+class _LiveMatchCardView extends StatelessWidget {
+  const _LiveMatchCardView({required this.match, required this.live, required this.onTap, required this.momentum, this.scorecard});
+  final MatchData match;
+  final bool live;
+  final VoidCallback onTap;
+  final String momentum;
+  final Map<String, dynamic>? scorecard;
+  @override
+  Widget build(BuildContext context) => Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: const Color(0xFF090909), border: Border.all(color: AppColors.acid)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Icon(Icons.circle, size: 8, color: live ? AppColors.red : AppColors.muted),
+                const SizedBox(width: 6),
+                Text(live ? 'LIVE' : match.status.toUpperCase(), style: const TextStyle(color: AppColors.red, fontSize: 11, fontWeight: FontWeight.bold)),
+                const SizedBox(width: 12),
+                Expanded(child: Text(match.seriesName(scorecard).toUpperCase(), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold))),
+              ]),
+              const Divider(color: AppColors.border),
+              Row(children: [Expanded(child: _team(match, 'A')), const Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('VS', style: TextStyle(color: AppColors.muted))), Expanded(child: _team(match, 'B'))]),
+              const Spacer(),
+              Container(width: double.infinity, padding: const EdgeInsets.all(10), color: AppColors.surface, child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Container(width: 3, height: 54, color: AppColors.acid), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('[Momentum Shift]', style: TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(height: 8), Text(momentum, maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12))])), const SizedBox(width: 8), const Icon(Icons.query_stats, color: AppColors.acid, size: 30)])),
+              const SizedBox(height: 10),
+              const Center(child: Text('View Full Prediction →', style: TextStyle(fontWeight: FontWeight.bold))),
+            ]),
+          ),
+        ),
+      );
+  Widget _team(MatchData match, String side) {
+    final isRight = side == 'B';
+    final logo = match.teamFlag(side, scorecard: scorecard);
+    final badge = logo != null && logo.isNotEmpty
+        ? ClipOval(child: Image.network(logo, width: 22, height: 22, fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()))
+        : const SizedBox(width: 22, height: 22);
+    return Column(crossAxisAlignment: isRight ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
+      Row(mainAxisAlignment: isRight ? MainAxisAlignment.end : MainAxisAlignment.start, children: [
+        if (!isRight) ...[badge, const SizedBox(width: 5)],
+        Flexible(child: Text(match.teamName(side, scorecard: scorecard), textAlign: isRight ? TextAlign.right : TextAlign.left, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
+        if (isRight) ...[const SizedBox(width: 5), badge],
+      ]),
+      const SizedBox(height: 3),
+      Text(match.teamScore(side, scorecard: scorecard), textAlign: isRight ? TextAlign.right : TextAlign.left, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+    ]);
+  }
 }
 
 class _MatchCard extends StatelessWidget {
@@ -975,13 +1401,23 @@ class _MatchCard extends StatelessWidget {
 
   Widget _team(MatchData match, String side) {
     final logo = match.teamFlag(side, scorecard: scorecard);
+    if (side == 'B') {
+      return Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+        Expanded(child: Text(match.teamName(side, scorecard: scorecard), textAlign: TextAlign.right, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
+        const SizedBox(width: 5),
+        if (logo != null && logo.isNotEmpty)
+          ClipOval(child: Image.network(logo, width: 24, height: 24, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 24, color: AppColors.muted)))
+        else
+          const Icon(Icons.shield, size: 24, color: AppColors.muted),
+      ]);
+    }
     return Row(children: [
       if (logo != null && logo.isNotEmpty)
-        ClipOval(child: Image.network(logo, width: 30, height: 30, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 25, color: AppColors.muted)))
+        ClipOval(child: Image.network(logo, width: 24, height: 24, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 24, color: AppColors.muted)))
       else
-        const Icon(Icons.shield, size: 25, color: AppColors.muted),
-      const SizedBox(width: 8),
-      Expanded(child: Text(match.teamName(side, scorecard: scorecard), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700))),
+        const Icon(Icons.shield, size: 24, color: AppColors.muted),
+      const SizedBox(width: 5),
+      Expanded(child: Text(match.teamName(side, scorecard: scorecard), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
     ]);
   }
 }
@@ -1963,6 +2399,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         return true;
       }).toList();
       if (filtered.isEmpty) return Center(child: Text(players.isEmpty ? 'No squad information available' : 'No players in this category', style: const TextStyle(color: AppColors.muted)));
+      if (_squadFilter == 0) return _wholeSquad(players);
       return ListView.builder(itemCount: filtered.length, itemBuilder: (context, index) {
         final player = filtered[index];
         final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? 'Player').toString();
@@ -1977,6 +2414,109 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       });
     })),
   ]);
+
+  Widget _wholeSquad(List<Map<String, dynamic>> players) {
+    final teamA = _playersForTeam(players, 'A');
+    final teamB = _playersForTeam(players, 'B');
+    final unassigned = players.where((player) => !_belongsToTeam(player, 'A') && !_belongsToTeam(player, 'B')).toList();
+    return Column(children: [
+      Expanded(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Expanded(child: _squadTeamColumn('A', teamA)),
+        Container(width: 1, color: AppColors.border),
+        Expanded(child: _squadTeamColumn('B', teamB)),
+      ])),
+      if (unassigned.isNotEmpty) ...[
+        const Divider(color: AppColors.border, height: 1),
+        Padding(padding: const EdgeInsets.all(8), child: Text('Other players', style: const TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600))),
+        SizedBox(height: 150, child: ListView.builder(itemCount: unassigned.length, itemBuilder: (context, i) => _squadPlayerRow(unassigned[i]))),
+      ],
+    ]);
+  }
+
+  List<Map<String, dynamic>> _playersForTeam(List<Map<String, dynamic>> players, String side) => players.where((player) => _belongsToTeam(player, side)).toList();
+
+  bool _belongsToTeam(Map<String, dynamic> player, String side) {
+    final labelValue = player['_teamLabel'] ?? player['teamName'] ?? player['team_name'] ?? player['team'];
+    final label = labelValue is Map
+        ? (labelValue['name'] ?? labelValue['shortName'] ?? labelValue['short_name'] ?? labelValue['id'] ?? '').toString()
+        : (labelValue ?? '').toString();
+    if (label.isEmpty) return false;
+    String normalize(String value) => value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final normalizedLabel = normalize(label);
+    final team = widget.match.raw['team$side'];
+    final aliases = <String>{widget.match.teamName(side, scorecard: widget.scorecard), 'team$side', 'team ${side.toLowerCase()}'};
+    if (team is Map) {
+      for (final key in ['name', 'shortName', 'short_name', 'teamName', 'team_name', 'id', 'teamId', 'team_id']) {
+        final value = team[key];
+        if (value != null) aliases.add(value.toString());
+      }
+    } else if (team != null) {
+      aliases.add(team.toString());
+    }
+    final scorecardTeam = widget.match._scorecardTeam(widget.scorecard, side);
+    if (scorecardTeam != null) {
+      for (final key in ['name', 'short_name', 'team_id', 'id']) {
+        final value = scorecardTeam[key];
+        if (value != null) aliases.add(value.toString());
+      }
+    }
+    return aliases.any((alias) {
+      final normalizedAlias = normalize(alias);
+      return normalizedAlias.isNotEmpty && (normalizedLabel == normalizedAlias || (normalizedAlias.length > 3 && normalizedLabel.contains(normalizedAlias)) || (normalizedLabel.length > 3 && normalizedAlias.contains(normalizedLabel)));
+    });
+  }
+
+  Widget _squadTeamColumn(String side, List<Map<String, dynamic>> players) {
+    final name = widget.match.teamName(side, scorecard: widget.scorecard);
+    final logo = widget.match.teamFlag(side, scorecard: widget.scorecard);
+    final rightAlign = side == 'B';
+    return Column(children: [
+      Container(
+        height: 42,
+        padding: const EdgeInsets.symmetric(horizontal: 7),
+        color: AppColors.surface,
+        child: Row(children: rightAlign ? [
+          Expanded(child: Text(name, textAlign: TextAlign.right, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700))),
+          const SizedBox(width: 6),
+          if (logo != null && logo.isNotEmpty) ClipOval(child: Image.network(logo, width: 22, height: 22, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 20, color: AppColors.muted))) else const Icon(Icons.shield, size: 20, color: AppColors.muted),
+        ] : [
+          if (logo != null && logo.isNotEmpty) ClipOval(child: Image.network(logo, width: 22, height: 22, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 20, color: AppColors.muted))) else const Icon(Icons.shield, size: 20, color: AppColors.muted),
+          const SizedBox(width: 6),
+          Expanded(child: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700))),
+        ]),
+      ),
+      const Divider(height: 1, color: AppColors.border),
+      Expanded(child: players.isEmpty
+          ? const Center(child: Text('No players listed', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 11)))
+          : ListView.separated(itemCount: players.length, separatorBuilder: (_, _) => const Divider(height: 1, color: AppColors.border), itemBuilder: (context, index) => _squadPlayerRow(players[index], alignRight: rightAlign))),
+    ]);
+  }
+
+  Widget _squadPlayerRow(Map<String, dynamic> player, {bool alignRight = false}) {
+    final name = _playerName(player);
+    final role = (player['role'] ?? player['playingRole'] ?? player['playing_role'] ?? player['position'] ?? 'Player').toString();
+    final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
+      child: Row(children: alignRight ? [
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Text(name, textAlign: TextAlign.right, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 2),
+          Text(role, textAlign: TextAlign.right, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, color: AppColors.muted)),
+        ])),
+        const SizedBox(width: 6),
+        CircleAvatar(radius: 16, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 18, color: AppColors.muted) : null),
+      ] : [
+        CircleAvatar(radius: 16, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 18, color: AppColors.muted) : null),
+        const SizedBox(width: 6),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 2),
+          Text(role, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, color: AppColors.muted)),
+        ])),
+      ]),
+    );
+  }
 
   String? _batsmanId(Map<String, dynamic> player) => (player['playerId'] ?? player['player_id'] ?? player['batsmanId'] ?? player['batsman_id'] ?? player['id'])?.toString();
   String? _playerId(Map<String, dynamic> player) => (player['playerId'] ?? player['player_id'] ?? player['id'])?.toString();
@@ -2261,7 +2801,7 @@ class _SideMenuState extends State<_SideMenu> {
             onTap: () {
               final navigator = Navigator.of(context);
               navigator.pop();
-              navigator.push(MaterialPageRoute(builder: (_) => const EmailLoginPage()));
+              navigator.push(MaterialPageRoute(builder: (_) => const LoginPage()));
             },
           );
         },
