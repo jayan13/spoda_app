@@ -140,7 +140,7 @@ class _LandingPageState extends State<LandingPage> {
             )),
             Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 18), child: Row(children: [
               Row(children: List.generate(4, (i) => Container(width: 6, height: 6, margin: const EdgeInsets.only(right: 4), decoration: BoxDecoration(color: i == _page ? AppColors.acid : AppColors.muted, shape: BoxShape.circle)))),
-              const Spacer(),
+              const SizedBox(height: 30),
               if (_page > 0 && _page < 3) IconButton(onPressed: () => _pager.previousPage(duration: const Duration(milliseconds: 220), curve: Curves.easeOut), icon: const Icon(Icons.arrow_back, color: AppColors.muted)),
               IconButton.filled(onPressed: () => _page == 3 ? _enter() : _pager.nextPage(duration: const Duration(milliseconds: 250), curve: Curves.easeOut), style: IconButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background), icon: Icon(_page == 3 ? Icons.check : Icons.arrow_forward)),
             ])),
@@ -562,10 +562,16 @@ class MatchData {
     return (raw['teamName$suffix'] ?? raw['team$suffix Name'] ?? 'Team $suffix').toString();
   }
   String teamScore(String suffix, {Map<String, dynamic>? scorecard}) {
-    final value = _scorecardTeam(scorecard, suffix)?['scores_full'];
+    final value = _scorecardTeam(scorecard, suffix)?['scores'];
     if (value is String && value.trim().isNotEmpty) return value.trim();
     if (value is num) return value.toString();
     return 'Yet to bat';
+  }
+  String teamOvers(String suffix, {Map<String, dynamic>? scorecard}) {
+    final value = _scorecardTeam(scorecard, suffix)?['overs'];
+    if (value is String && value.trim().isNotEmpty) return value.trim();
+    if (value is num) return value.toString();
+    return '';
   }
   String scoreFrom(Map<String, dynamic>? scorecard) {
     final value = _findScorecardValue(scorecard, 'scores_full');
@@ -575,12 +581,11 @@ class MatchData {
     return score;
   }
   String seriesName(Map<String, dynamic>? scorecard) {
-    final rootName = scorecard?['name'];
-    if (rootName is String && rootName.trim().isNotEmpty) return rootName.trim();
-    final data = scorecard?['data'];
-    if (data is Map && data['name'] is String && (data['name'] as String).trim().isNotEmpty) return (data['name'] as String).trim();
+    final value = _findScorecardValue(scorecard, 'format_str');
+    if (value is String && value.trim().isNotEmpty) return value.trim();
     return tournament;
   }
+  String matchFormatLabel(Map<String, dynamic>? scorecard) => '[${seriesName(scorecard)}]';
   Object? _findScorecardValue(Object? value, String key) {
     if (value is Map) {
       for (final entry in value.entries) {
@@ -806,7 +811,7 @@ class _HomePageState extends State<HomePage> {
         if (cards.isEmpty) return const SizedBox.shrink();
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _sectionHeader('Live Matches', () => setState(() { _tab = 1; _matchStatus = 0; })),
-          SizedBox(height: 295, child: ListView.separated(
+          SizedBox(height: 275, child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: cards.length,
             separatorBuilder: (_, _) => const SizedBox(width: 10),
@@ -833,19 +838,19 @@ class _HomePageState extends State<HomePage> {
           decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)),
           child: Column(children: [
             Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(match.tournament.toUpperCase(), style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)),
+              Text(match.matchFormatLabel(scorecard), style: const TextStyle(color: AppColors.acid, fontSize: 12, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
               Row(children: [
                 Expanded(child: _alignedUpcomingTeam(match, 'A', scorecard)),
                 const Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('vs', style: TextStyle(color: AppColors.muted))),
                 Expanded(child: _alignedUpcomingTeam(match, 'B', scorecard)),
                 const SizedBox(width: 12), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12),
-                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 11))]),
+                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Padding(padding: const EdgeInsets.only(left: 40), child: Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)))]),
               ]),
             ])),
             Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [
               Expanded(child: Text(_isLive(match) ? 'Live match updates and score' : _isDone(match) ? 'Match result and scorecard available' : 'Match prediction and insights available', style: const TextStyle(fontSize: 12, color: Colors.white70))),
-              TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: Text(_isLive(match) ? 'Live Match' : _isDone(match) ? 'Scorecard' : 'Prediction', style: const TextStyle(fontWeight: FontWeight.bold))),
+              TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: Text(_isLive(match) ? 'Live Match' : _isDone(match) ? 'Scorecard ›' : 'Prediction ›', style: const TextStyle(fontWeight: FontWeight.bold))),
             ])),
           ]),
         ),
@@ -862,7 +867,7 @@ class _HomePageState extends State<HomePage> {
   void _openMatchDetails(MatchData match, [Map<String, dynamic>? scorecard]) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MatchDetailPage(match: match, scorecard: scorecard)));
   Widget _upcomingCardContent(MatchData match, Map<String, dynamic>? scorecard) => InkWell(
         onTap: () => _openMatchDetails(match, scorecard),
-        child: Container(margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Column(children: [Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(match.tournament.toUpperCase(), style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(height: 12), Row(children: [Expanded(child: Row(children: [_teamBadge(match, 'A', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('A', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700))), const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('vs', style: TextStyle(color: AppColors.muted))), _teamBadge(match, 'B', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('B', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)))])), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 11))])])])), Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [const Expanded(child: Text('•  Match prediction and insights available', style: TextStyle(fontSize: 12, color: Colors.white70))), TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: const Text('Prediction  ›', style: TextStyle(fontWeight: FontWeight.bold)))]) )])));
+        child: Container(margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Column(children: [Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(match.matchFormatLabel(scorecard), style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(height: 12), Row(children: [Expanded(child: Row(children: [_teamBadge(match, 'A', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('A', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700))), const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('vs', style: TextStyle(color: AppColors.muted))), _teamBadge(match, 'B', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('B', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)))])), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Padding(padding: const EdgeInsets.only(left: 40), child: Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)))])])])), Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [const Expanded(child: Text('•  Match prediction and insights available', style: TextStyle(fontSize: 12, color: Colors.white70))), TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: const Text('Prediction  ›', style: TextStyle(fontWeight: FontWeight.bold)))]) )])));
   String _dateLabel(MatchData match) {
     final date = match.startDate?.toLocal();
     if (date == null) return 'Upcoming';
@@ -1253,42 +1258,68 @@ class _LiveMatchCardState extends State<_LiveMatchCard> {
   }
 
   List<MapEntry<String, double>> _extract(Object? input) {
-    Object? value;
-    void find(Object? node) {
-      if (value != null) return;
-      if (node is Map) {
-        for (final entry in node.entries) { if (entry.key.toString().toLowerCase() == 'win_probability') { value = entry.value; return; } }
-        for (final child in node.values) { find(child); if (value != null) return; }
-      } else if (node is List) { for (final child in node) { find(child); if (value != null) return; } }
-    }
-    find(input);
     final found = <MapEntry<String, double>>[];
     double? number(Object? x) {
       if (x is num) return x.toDouble();
       if (x is String) return double.tryParse(x.replaceAll('%', '').trim());
       return null;
     }
+    String? teamLabel(Object? value) {
+      if (value is Map) {
+        return (value['name'] ?? value['short_name'] ?? value['shortName'] ?? value['team_name'])?.toString();
+      }
+      if (value is String && value.trim().isNotEmpty) return value.trim();
+      return null;
+    }
     String team(String? label) {
       final normalized = label?.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '') ?? '';
       if (normalized == 'teama' || normalized == 'team1' || normalized == 'a') return widget.match.teamName('A', scorecard: widget.scorecard);
       if (normalized == 'teamb' || normalized == 'team2' || normalized == 'b') return widget.match.teamName('B', scorecard: widget.scorecard);
+      if (normalized == 'id' || normalized == 'team' || normalized == 'probability') return '';
       return label?.trim().isNotEmpty == true ? label!.trim() : '';
     }
-    void walk(Object? node, [String? hint]) {
-      if (node is List) { for (var i = 0; i < node.length; i++) { walk(node[i], hint ?? (i == 0 ? 'A' : i == 1 ? 'B' : null)); } return; }
+    void addProbability(Object? node, String? context, [String? hint]) {
+      if (node is List) {
+        for (var i = 0; i < node.length; i++) {
+          addProbability(node[i], context, hint ?? (i == 0 ? 'A' : i == 1 ? 'B' : null));
+        }
+        return;
+      }
       if (node is Map) {
-        final p = number(node['probability']);
-        if (p != null) {
-          final name = team((node['team_name'] ?? node['teamName'] ?? node['short_name'] ?? node['name'] ?? node['team'] ?? hint)?.toString());
+        final localTeam = teamLabel(node['team_name'] ?? node['teamName'] ?? node['short_name'] ?? node['team']) ??
+            teamLabel(node['name']) ?? context;
+        final p = number(node['probability'] ?? node['win_probability']);
+        if (p != null && p >= 0 && p <= 100) {
+          final name = team(localTeam ?? hint);
           if (name.isNotEmpty) found.add(MapEntry(name, p <= 1 ? p * 100 : p));
         }
-        for (final entry in node.entries) { if (entry.key.toString().toLowerCase() != 'probability') walk(entry.value, entry.key.toString()); }
-      } else {
-        final p = number(node); final name = team(hint);
-        if (p != null && name.isNotEmpty) found.add(MapEntry(name, p <= 1 ? p * 100 : p));
+        for (final entry in node.entries) {
+          final key = entry.key.toString().toLowerCase();
+          if (!{'probability', 'win_probability', 'id', 'team_id', 'teamid'}.contains(key)) {
+            addProbability(entry.value, localTeam, entry.key.toString());
+          }
+        }
+      } else if (node != null) {
+        final p = number(node);
+        final name = team(context ?? hint);
+        if (p != null && p >= 0 && p <= 100 && name.isNotEmpty) found.add(MapEntry(name, p <= 1 ? p * 100 : p));
       }
     }
-    walk(value);
+    void find(Object? node, [String? context]) {
+      if (node is List) {
+        for (final child in node) { find(child, context); }
+      } else if (node is Map) {
+        final localTeam = teamLabel(node['team']) ?? teamLabel(node['team_name'] ?? node['teamName']) ?? context;
+        for (final entry in node.entries) {
+          if (entry.key.toString().toLowerCase() == 'win_probability') {
+            addProbability(entry.value, localTeam);
+          } else if (entry.value is Map || entry.value is List) {
+            find(entry.value, localTeam);
+          }
+        }
+      }
+    }
+    find(input);
     return found;
   }
 
@@ -1315,16 +1346,16 @@ class _LiveMatchCardView extends StatelessWidget {
               Row(children: [
                 Icon(Icons.circle, size: 8, color: live ? AppColors.red : AppColors.muted),
                 const SizedBox(width: 6),
-                Text(live ? 'LIVE' : match.status.toUpperCase(), style: const TextStyle(color: AppColors.red, fontSize: 11, fontWeight: FontWeight.bold)),
+                Text(live ? 'LIVE' : match.status.toUpperCase(), style: const TextStyle(color: AppColors.red, fontSize: 12, fontWeight: FontWeight.w600)),
                 const SizedBox(width: 12),
-                Expanded(child: Text(match.seriesName(scorecard).toUpperCase(), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold))),
+                Expanded(child: Text(match.matchFormatLabel(scorecard), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold))),
               ]),
               const Divider(color: AppColors.border),
               Row(children: [Expanded(child: _team(match, 'A')), const Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('VS', style: TextStyle(color: AppColors.muted))), Expanded(child: _team(match, 'B'))]),
-              const Spacer(),
-              Container(width: double.infinity, padding: const EdgeInsets.all(10), color: AppColors.surface, child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Container(width: 3, height: 54, color: AppColors.acid), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('[Momentum Shift]', style: TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(height: 8), Text(momentum, maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12))])), const SizedBox(width: 8), const Icon(Icons.query_stats, color: AppColors.acid, size: 30)])),
+              const SizedBox(height: 30),
+              Container(width: double.infinity, padding: const EdgeInsets.all(10), color: AppColors.surface, child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Container(width: 3, height: 54, color: AppColors.acid), const SizedBox(width: 10), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('[Momentum Shift]', style: TextStyle(color: AppColors.acid, fontSize: 12, fontWeight: FontWeight.w600)), const SizedBox(height: 8), Text(momentum, maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12))])), const SizedBox(width: 8), const Icon(Icons.query_stats, color: AppColors.acid, size: 30)])),
               const SizedBox(height: 10),
-              const Center(child: Text('View Full Prediction →', style: TextStyle(fontWeight: FontWeight.bold))),
+              const Center(child: Text('View Full Prediction →', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600))),
             ]),
           ),
         ),
@@ -1333,22 +1364,35 @@ class _LiveMatchCardView extends StatelessWidget {
     final isRight = side == 'B';
     final logo = match.teamFlag(side, scorecard: scorecard);
     final badge = logo != null && logo.isNotEmpty
-        ? ClipOval(child: Image.network(logo, width: 22, height: 22, fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()))
-        : const SizedBox(width: 22, height: 22);
+        ? ClipOval(child: Image.network(logo, width: 32, height: 32, fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()))
+        : const SizedBox(width: 23, height: 32);
+    final score = match.teamScore(side, scorecard: scorecard);
     return Column(crossAxisAlignment: isRight ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
-      Row(mainAxisAlignment: isRight ? MainAxisAlignment.end : MainAxisAlignment.start, children: [
+      Row(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: isRight ? MainAxisAlignment.end : MainAxisAlignment.start, children: [
         if (!isRight) ...[badge, const SizedBox(width: 5)],
-        Flexible(child: Text(match.teamName(side, scorecard: scorecard), textAlign: isRight ? TextAlign.right : TextAlign.left, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
+        Flexible(child: Text(match.teamName(side, scorecard: scorecard), textAlign: isRight ? TextAlign.right : TextAlign.left, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w500))),
         if (isRight) ...[const SizedBox(width: 5), badge],
       ]),
       const SizedBox(height: 3),
-      Text(match.teamScore(side, scorecard: scorecard), textAlign: isRight ? TextAlign.right : TextAlign.left, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+      if (score == 'Yet to bat')
+        Text(score, textAlign: isRight ? TextAlign.right : TextAlign.left, style: const TextStyle(color: Colors.white, fontSize: 16))
+      else
+        Text.rich(
+          TextSpan(children: [
+            TextSpan(text: score, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+            if (match.teamOvers(side, scorecard: scorecard).isNotEmpty)
+              TextSpan(text: ' (${match.teamOvers(side, scorecard: scorecard)} ov)', style: const TextStyle(color: Colors.white, fontSize: 12)),
+          ]),
+          textAlign: isRight ? TextAlign.right : TextAlign.left,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
     ]);
   }
 }
 
 class _MatchCard extends StatelessWidget {
-  const _MatchCard({required this.match, required this.live, required this.showPrediction, required this.onTap, this.scorecard});
+  const _MatchCard({required this.match, required this.live, required this.showPrediction, required this.onTap}) : scorecard = null;
   final MatchData match;
   final bool live;
   final bool showPrediction;
@@ -1370,7 +1414,7 @@ class _MatchCard extends StatelessWidget {
               if (match.venue.isNotEmpty) Flexible(child: Text(match.venue, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.muted, fontSize: 10))),
             ]),
             const Divider(color: AppColors.border, height: 22),
-            Text(match.tournament.toUpperCase(), style: const TextStyle(color: AppColors.muted, fontSize: 10, fontWeight: FontWeight.w700)),
+            Text(match.matchFormatLabel(scorecard), style: const TextStyle(color: AppColors.muted, fontSize: 10, fontWeight: FontWeight.w700)),
             const SizedBox(height: 12),
             Row(children: [
               Expanded(child: _team(match, 'A')),
@@ -1386,7 +1430,7 @@ class _MatchCard extends StatelessWidget {
                 TextButton(
                   onPressed: onTap,
                   style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), shape: const RoundedRectangleBorder(), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                  child: const Text('Prediction  ›', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                  child: const Text('Prediction  ›', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
                 )
               else ...[
                 const Icon(Icons.insights, color: AppColors.acid, size: 18),
@@ -1403,7 +1447,7 @@ class _MatchCard extends StatelessWidget {
     final logo = match.teamFlag(side, scorecard: scorecard);
     if (side == 'B') {
       return Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-        Expanded(child: Text(match.teamName(side, scorecard: scorecard), textAlign: TextAlign.right, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
+        Expanded(child: Text(match.teamName(side, scorecard: scorecard), textAlign: TextAlign.right, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))),
         const SizedBox(width: 5),
         if (logo != null && logo.isNotEmpty)
           ClipOval(child: Image.network(logo, width: 24, height: 24, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 24, color: AppColors.muted)))
@@ -1417,7 +1461,7 @@ class _MatchCard extends StatelessWidget {
       else
         const Icon(Icons.shield, size: 24, color: AppColors.muted),
       const SizedBox(width: 5),
-      Expanded(child: Text(match.teamName(side, scorecard: scorecard), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
+      Expanded(child: Text(match.teamName(side, scorecard: scorecard), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold))),
     ]);
   }
 }
@@ -2965,7 +3009,11 @@ class _TeamLinePainter extends CustomPainter {
         points.add(Offset(x, top + h * (1 - teams[ti].values[i].toDouble() / max)));
       }
       final path = Path();
-      for (var i = 0; i < points.length; i++) { if (i == 0) path.moveTo(points[i].dx, points[i].dy); else path.lineTo(points[i].dx, points[i].dy); }
+      for (var i = 0; i < points.length; i++) { if (i == 0) {
+        path.moveTo(points[i].dx, points[i].dy);
+      } else {
+        path.lineTo(points[i].dx, points[i].dy);
+      } }
       canvas.drawPath(path, Paint()..color = colors[ti % colors.length]..style = PaintingStyle.stroke..strokeWidth = 2.2);
       for (final p in points) { canvas.drawCircle(p, 2.2, Paint()..color = colors[ti % colors.length]); }
     }
