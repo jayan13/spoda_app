@@ -70,12 +70,24 @@ class _AuthRouterState extends State<AuthRouter> {
       return;
     }
     if (uri.path != '/callback') return;
+    final verificationToken = uri.queryParameters['token'];
+    if (verificationToken != null && verificationToken.isNotEmpty) {
+      try {
+        await AuthService.instance.verifyEmail(verificationToken);
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Email verified. You can now log in.')));
+      } on AuthException catch (error) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+      return;
+    }
     try {
       await AuthService.instance.storeProviderTokens(uri);
       final profile = await AuthService.instance.restoreProfile();
       if (!mounted) return;
       if (profile == null) throw const AuthException('Sign-in completed, but the profile could not be loaded.');
-      setState(() => _session = Future.value(profile));
+      setState(() {
+        _session = Future.value(profile);
+      });
     } on AuthException catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
     }
@@ -494,17 +506,10 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
   final _formKey = GlobalKey<FormState>();
   final _password = TextEditingController();
   bool _busy = false;
-  bool _verified = false;
+  final bool _verified = true;
   String? _error;
   @override
-  void initState() { super.initState(); _verifyToken(); }
-  @override
   void dispose() { _password.dispose(); super.dispose(); }
-
-  Future<void> _verifyToken() async {
-    try { await AuthService.instance.verifyResetToken(widget.token); if (mounted) setState(() => _verified = true); }
-    on AuthException catch (error) { if (mounted) setState(() => _error = error.message); }
-  }
 
   Future<void> _change() async {
     if (!_formKey.currentState!.validate()) return;
@@ -1476,7 +1481,7 @@ class MatchDetailPage extends StatefulWidget {
 }
 
 class _MatchDetailPageState extends State<MatchDetailPage> {
-  static const _tabs = ['Pre-match', 'Ai Signal', 'Squads', 'Stats'];
+  static const _tabs = ['Pre-match', 'Ai Signal', 'Squads', 'Stats', 'Scorecard'];
   static const _prompts = ['Top Runs?', 'Top Performer?', 'Match Winner?'];
   final _question = TextEditingController();
   int _selectedTab = 0;
@@ -1497,6 +1502,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   int _bowlerThreshold = 0;
   String? _selectedBowlerId;
   bool _bowlerDefaultApplied = false;
+  bool _squadAnnounced = false;
   int _bowlerComparisonMetric = 0;
   Future<List<Map<String, dynamic>>> _topBatters = Future.value(const []);
   Future<Object?> _batterComparison = Future.value(null);
@@ -1510,11 +1516,25 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   late final Future<Object?> _groundBoundaries = _loadGroundData('/match-ground-analysis/boundaries-per-game');
   late final Future<Object?> _groundParScore = _loadGroundData('/match-ground-analysis/par-score');
   late final Future<Object?> _groundWickets = _loadGroundData('/match-ground-analysis/wickets-per-innings');
+  late final Future<Map<String, dynamic>?> _matchScorecard = _loadDetailScorecard();
+  int _scorecardInnings = 0;
 
   @override
   void initState() {
     super.initState();
     _teamAnalysis = _loadTeamAnalysis();
+  }
+
+  Future<Map<String, dynamic>?> _loadDetailScorecard() async {
+    if (widget.match.matchId.isEmpty) return widget.scorecard;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('api.spoda.ai', '/match-scorecard', {'matchId': widget.match.matchId});
+      final response = await (await client.getUrl(uri)).close();
+      if (response.statusCode < 200 || response.statusCode >= 300) return widget.scorecard;
+      final payload = jsonDecode(await response.transform(utf8.decoder).join());
+      return payload is Map ? Map<String, dynamic>.from(payload) : widget.scorecard;
+    } catch (_) { return widget.scorecard; } finally { client.close(force: true); }
   }
 
   String? _teamId(String side) {
@@ -1748,8 +1768,40 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final response = await (await client.getUrl(uri)).close();
       final body = await response.transform(utf8.decoder).join();
       if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Players returned ${response.statusCode}');
-      return _decodePlayers(jsonDecode(body));
+      final payload = jsonDecode(body);
+      final announced = _readSquadAnnounced(payload);
+      if (announced != null && mounted) {
+        setState(() => _squadAnnounced = announced);
+      }
+      return _decodePlayers(payload);
     } finally { client.close(force: true); }
+  }
+
+  bool? _readSquadAnnounced(Object? value) {
+    if (value is List) {
+      for (final item in value) {
+        final result = _readSquadAnnounced(item);
+        if (result != null) return result;
+      }
+    } else if (value is Map) {
+      for (final entry in value.entries) {
+        final key = entry.key.toString().toLowerCase().replaceAll(RegExp(r'[_-]'), '');
+        if (key == 'squadannounced') {
+          final raw = entry.value;
+          if (raw is bool) return raw;
+          if (raw is String) {
+            if (raw.toLowerCase() == 'true') return true;
+            if (raw.toLowerCase() == 'false') return false;
+          }
+          if (raw is num) return raw != 0;
+        }
+      }
+      for (final nested in value.values) {
+        final result = _readSquadAnnounced(nested);
+        if (result != null) return result;
+      }
+    }
+    return null;
   }
 
   List<Map<String, dynamic>> _decodePlayers(Object? value, [String? inheritedTeam]) {
@@ -1793,17 +1845,128 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           ])),
           SizedBox(height: 44, child: Row(children: List.generate(_tabs.length, (i) => Expanded(child: InkWell(
             onTap: () => setState(() => _selectedTab = i),
-            child: Column(children: [Expanded(child: Center(child: Text(_tabs[i], maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: _selectedTab == i ? Colors.white : AppColors.muted, fontWeight: _selectedTab == i ? FontWeight.w700 : FontWeight.w400)))), Container(height: 2, color: _selectedTab == i ? AppColors.acid : Colors.transparent)]),
+            child: Column(children: [Expanded(child: Center(child: Text(i == 2 && _squadAnnounced ? 'Playing XI' : _tabs[i], maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: _selectedTab == i ? Colors.white : AppColors.muted, fontWeight: _selectedTab == i ? FontWeight.w700 : FontWeight.w400)))), Container(height: 2, color: _selectedTab == i ? AppColors.acid : Colors.transparent)]),
           ))))),
           Expanded(child: switch (_selectedTab) {
             0 => _preMatchReportContent(),
             2 => _squadsContent(),
             3 => _groundStatsContent(),
+            4 => _scorecardContent(),
             _ => const SizedBox.expand(),
           }),
           _askAiSection(),
         ])),
       );
+
+  Widget _scorecardContent() => FutureBuilder<Map<String, dynamic>?>(
+    future: _matchScorecard,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
+      final root = snapshot.data;
+      final data = root?['data'];
+      final response = data is Map ? data['response'] : null;
+      final inningsRaw = response is Map ? response['innings'] : null;
+      if (inningsRaw is! List || inningsRaw.isEmpty) return const Center(child: Text('Scorecard is not available yet', style: TextStyle(color: AppColors.muted)));
+      final innings = inningsRaw.whereType<Map>().map((row) => Map<String, dynamic>.from(row)).toList()
+        ..sort((a, b) => (_scorecardNumber(a['number'])).compareTo(_scorecardNumber(b['number'])));
+      final selected = _scorecardInnings.clamp(0, innings.length - 1);
+      final inning = innings[selected];
+      return Column(children: [
+        if (innings.length > 1) SizedBox(height: 48, child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          itemCount: innings.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
+          itemBuilder: (context, index) {
+            final active = index == selected;
+            final team = _scorecardTeamName(innings[index]);
+            return InkWell(onTap: () => setState(() => _scorecardInnings = index), child: Container(
+              constraints: const BoxConstraints(minWidth: 120), padding: const EdgeInsets.symmetric(horizontal: 14),
+              alignment: Alignment.center, color: active ? AppColors.acid : const Color(0xFF202020),
+              child: Text('$team - ${innings[index]['scores'] ?? ''}', maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: active ? Colors.black : Colors.white, fontSize: 12, fontWeight: FontWeight.w700)),
+            ));
+          },
+        )),
+        Expanded(child: ListView(padding: const EdgeInsets.fromLTRB(12, 8, 12, 16), children: [
+          _scorecardSection('Batter', _scorecardRows(inning['batsmen'])),
+          _scorecardInningExtras(inning),
+          _scorecardYetToBat(inning),
+          _scorecardFallOfWickets(inning),
+          _scorecardSection('Bowler', _scorecardRows(inning['bowlers'])),
+          _scorecardPartnership(inning),
+        ])),
+      ]);
+    },
+  );
+
+  int _scorecardNumber(Object? value) => int.tryParse(value?.toString() ?? '') ?? 0;
+  String _scorecardTeamName(Map<String, dynamic> inning) {
+    final raw = (inning['name'] ?? inning['short_name'] ?? '').toString().trim();
+    return raw.replaceFirst(RegExp(r'\s+Inning$', caseSensitive: false), '').trim().isEmpty
+        ? widget.match.teamName(_scorecardNumber(inning['number']) <= 1 ? 'A' : 'B', scorecard: widget.scorecard)
+        : raw.replaceFirst(RegExp(r'\s+Inning$', caseSensitive: false), '').trim();
+  }
+  List<Map<String, dynamic>> _scorecardRows(Object? value) => value is List ? value.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList() : const [];
+  String _scorecardValue(Map<String, dynamic> row, List<String> keys, [String fallback = '0']) {
+    for (final key in keys) { final value = row[key]; if (value != null && value.toString().isNotEmpty) return value.toString(); }
+    return fallback;
+  }
+  Widget _scorecardHeading(String title, {String? columns}) => Container(
+    color: const Color(0xFF292929), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+    child: Row(children: [Expanded(child: Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))), if (columns != null) Text(columns, style: const TextStyle(fontSize: 10, color: AppColors.muted))]),
+  );
+  Widget _scorecardSection(String title, List<Map<String, dynamic>> rows) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+    _scorecardHeading(title, columns: title == 'Batter' ? 'R     B    4s   6s    SR' : 'OV    M    R    W    ECO'),
+    if (rows.isEmpty) _scorecardLine('No $title data'),
+    ...rows.map((row) {
+      final batting = title == 'Batter';
+      final name = _scorecardValue(row, ['name', 'title'], '—');
+      final stats = batting
+          ? '${_scorecardValue(row, ['runs'])}    ${_scorecardValue(row, ['balls_faced', 'balls'])}    ${_scorecardValue(row, ['fours'])}    ${_scorecardValue(row, ['sixes'])}    ${_scorecardValue(row, ['strike_rate', 'sr'])}'
+          : '${_scorecardValue(row, ['overs'])}    ${_scorecardValue(row, ['maidens'])}    ${_scorecardValue(row, ['runs_conceded', 'runs'])}    ${_scorecardValue(row, ['wickets'])}    ${_scorecardValue(row, ['econ', 'economy'])}';
+      final howOut = (row['how_out'] ?? '').toString();
+      return Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [Expanded(child: Text(name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))), Text(stats, style: const TextStyle(fontSize: 10, color: Colors.white70))]),
+        if (batting && howOut.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(howOut, style: const TextStyle(fontSize: 10, color: AppColors.muted))),
+      ]));
+    }),
+  ]);
+  Widget _scorecardLine(String text) => Padding(padding: const EdgeInsets.all(10), child: Text(text, style: const TextStyle(fontSize: 11, color: AppColors.muted)));
+  Widget _scorecardInningExtras(Map<String, dynamic> inning) {
+    final extras = inning['extra_runs'] ?? inning['extras'];
+    if (extras == null) return const SizedBox.shrink();
+    if (extras is Map) {
+      final details = extras.entries.map((e) => '${e.key}: ${e.value}').join(', ');
+      return _scorecardLine('Extras: $details');
+    }
+    return _scorecardLine('Extras: $extras');
+  }
+  Widget _scorecardYetToBat(Map<String, dynamic> inning) {
+    final supplied = inning['yet_to_bat'] ?? inning['yetToBat'] ?? inning['did_not_bat'];
+    final names = supplied is List ? supplied.map((e) => e is Map ? (e['name'] ?? e['title'] ?? '').toString() : e.toString()).where((e) => e.isNotEmpty).toList() : <String>[];
+    if (names.isEmpty) names.addAll(_scorecardRows(inning['batsmen']).where((p) => '${p['batting']}'.toLowerCase() == 'true').map((p) => (p['name'] ?? '').toString()).where((s) => s.isNotEmpty));
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [_scorecardHeading('Yet to bat'), _scorecardLine(names.isEmpty ? '—' : names.join(', '))]);
+  }
+  Widget _scorecardFallOfWickets(Map<String, dynamic> inning) {
+    final fows = _scorecardRows(inning['fows']);
+    final text = fows.map((f) => '${f['score_at_dismissal'] ?? ''}/${f['number'] ?? ''} (${f['name'] ?? ''}, ${f['overs_at_dismissal'] ?? ''} ov)').join(', ');
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [_scorecardHeading('Fall of wicket'), _scorecardLine(text.isEmpty ? '—' : text)]);
+  }
+  Widget _scorecardPartnership(Map<String, dynamic> inning) {
+    final partnership = inning['current_partnership'];
+    if (partnership is! Map) return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [_scorecardHeading('Partnership'), _scorecardLine('—')]);
+    final batsmen = partnership['batsmen'] is List ? (partnership['batsmen'] as List).whereType<Map>().toList() : <Map>[];
+    final first = batsmen.isNotEmpty ? batsmen[0] : const {};
+    final second = batsmen.length > 1 ? batsmen[1] : const {};
+    final runs = partnership['runs'] ?? 0, balls = partnership['balls'] ?? 0;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      _scorecardHeading('Partnership'),
+      Padding(padding: const EdgeInsets.fromLTRB(10, 10, 10, 6), child: Row(children: [Expanded(child: Text('${first['name'] ?? 'Batter'} ${first['runs'] ?? 0}(${first['balls'] ?? 0})', style: const TextStyle(fontSize: 11))), Text('$runs($balls)', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)), Expanded(child: Text('${second['name'] ?? 'Batter'} ${second['runs'] ?? 0}(${second['balls'] ?? 0})', textAlign: TextAlign.right, style: const TextStyle(fontSize: 11)))])),
+      ClipRRect(borderRadius: BorderRadius.circular(8), child: LinearProgressIndicator(value: _scorecardNumber(runs) == 0 ? 0 : (_scorecardNumber(first['runs']) / _scorecardNumber(runs)).clamp(0, 1).toDouble(), minHeight: 7, backgroundColor: const Color(0xFF4D83FF), color: const Color(0xFF13B981))),
+      const SizedBox(height: 14),
+    ]);
+  }
 
   Widget _groundStatsContent() => Column(children: [
     Padding(

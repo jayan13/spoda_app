@@ -108,10 +108,12 @@ class AuthService {
     await _post('/auth/forgot-password', {'email': email, 'redirectUrl': passwordResetRedirectUrl});
   }
 
-  Future<void> verifyResetToken(String token) async { await _post('/auth/verify', {'token': token}); }
+  Future<void> verifyEmail(String token) async {
+    await _post('/auth/email/verify', {'token': token});
+  }
 
   Future<void> changePassword({required String token, required String password}) async {
-    await _post('/auth/change-password', {'resetPasswordToken': token, 'password': password});
+    await _post('/auth/change-password', {'token': token, 'newPassword': password});
   }
 
   Future<String?> accessToken() => _storage.read(key: _accessKey);
