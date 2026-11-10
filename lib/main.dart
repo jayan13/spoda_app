@@ -22,6 +22,8 @@ abstract final class AppColors {
   static const red = Color(0xFFFF3333);
 }
 
+final Set<int> _savedPostIds = {};
+
 class SpodaApp extends StatelessWidget {
   const SpodaApp({super.key});
 
@@ -204,9 +206,18 @@ class _FeatureList extends StatelessWidget { const _FeatureList(); @override Wid
 class _Feature extends StatelessWidget { const _Feature(this.image, this.title, this.caption); final String image, title, caption; @override Widget build(BuildContext context) => Container(width: double.infinity, padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Row(children: [Image.asset(image, width: 32, height: 32, fit: BoxFit.contain), const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: const TextStyle(fontWeight: FontWeight.bold)), Text(caption, style: const TextStyle(color: AppColors.muted, fontSize: 11))]))])); }
 
 class _LoginPanel extends StatelessWidget {
-  const _LoginPanel({this.isLogin = false});
+  const _LoginPanel({this.isLogin = false, this.onLoggedIn});
 
   final bool isLogin;
+  final VoidCallback? onLoggedIn;
+
+  Future<void> _emailLogin(BuildContext context) async {
+    final loggedIn = await Navigator.of(context).push<bool>(MaterialPageRoute(builder: (_) => EmailLoginPage(onLoggedIn: onLoggedIn)));
+    if (loggedIn == true && context.mounted && onLoggedIn != null) {
+      Navigator.of(context).pop();
+      onLoggedIn!();
+    }
+  }
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -221,14 +232,14 @@ class _LoginPanel extends StatelessWidget {
           const SizedBox(height: 9),
           _SocialLoginButton(label: 'Continue with Facebook', asset: 'assets/facebook.png', onPressed: () => _startSocialLogin(context, 'facebook')),
           const SizedBox(height: 9),
-          _SocialLoginButton(label: 'Continue with email', asset: 'assets/email.png', onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const EmailLoginPage()))),
+          _SocialLoginButton(label: 'Continue with email', asset: 'assets/email.png', onPressed: () => _emailLogin(context)),
           const SizedBox(height: 14),
           const Center(child: Text('By continuing, you agree to the Terms of Service\nand acknowledge our Privacy Policy.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 10))),
           const Spacer(),
           if (!isLogin) ...[
             Center(child: RichText(text: TextSpan(style: const TextStyle(color: AppColors.muted, fontSize: 12), children: [
               const TextSpan(text: 'Already a member?  '),
-              WidgetSpan(child: GestureDetector(onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const EmailLoginPage())), child: const Text('Log in', style: TextStyle(color: AppColors.acid, fontWeight: FontWeight.w600)))),
+              WidgetSpan(child: GestureDetector(onTap: () => _emailLogin(context), child: const Text('Log in', style: TextStyle(color: AppColors.acid, fontWeight: FontWeight.w600)))),
             ]))),
             const SizedBox(height: 8),
           ],
@@ -242,7 +253,8 @@ class _LoginPanel extends StatelessWidget {
 }
 
 class LoginPage extends StatelessWidget {
-  const LoginPage({super.key});
+  const LoginPage({super.key, this.onLoggedIn});
+  final VoidCallback? onLoggedIn;
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -251,7 +263,7 @@ class LoginPage extends StatelessWidget {
           title: const Text('Log In'),
           leading: IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.arrow_back)),
         ),
-        body: SafeArea(child: _LoginPanel(isLogin: true)),
+        body: SafeArea(child: _LoginPanel(isLogin: true, onLoggedIn: onLoggedIn)),
       );
 }
 
@@ -283,7 +295,8 @@ class _SocialLoginButton extends StatelessWidget {
 }
 
 class EmailLoginPage extends StatefulWidget {
-  const EmailLoginPage({super.key});
+  const EmailLoginPage({super.key, this.onLoggedIn});
+  final VoidCallback? onLoggedIn;
   @override
   State<EmailLoginPage> createState() => _EmailLoginPageState();
 }
@@ -302,7 +315,11 @@ class _EmailLoginPageState extends State<EmailLoginPage> {
       await AuthService.instance.login(email: _username.text.trim(), password: _password.text);
       await AuthService.instance.restoreProfile();
       if (!mounted) return;
-      Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const HomePage()), (_) => false);
+      if (widget.onLoggedIn != null) {
+        Navigator.of(context).pop(true);
+      } else {
+        Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const HomePage()), (_) => false);
+      }
     } on AuthException catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
     } finally {
@@ -685,7 +702,6 @@ class _HomePageState extends State<HomePage> {
   late Future<List<MatchData>> _matches = _loadMatches();
   late Future<List<BlogPost>> _posts = _loadPosts(4, 1);
   final Map<String, Future<Map<String, dynamic>?>> _scorecardRequests = {};
-  final Set<int> _savedPostIds = {};
   Future<List<BlogPost>> _loadPosts(int count, int page) async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
     try {
@@ -699,6 +715,23 @@ class _HomePageState extends State<HomePage> {
       return decoded.whereType<Map>().map((row) => BlogPost.fromJson(Map<String, dynamic>.from(row))).toList();
     } finally { client.close(force: true); }
   }
+  Future<List<BlogPost>> _loadSavedPosts(Set<int> ids) async {
+    if (ids.isEmpty) return const [];
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final uri = Uri.http('140.238.244.171:8083', '/wp-json/wp/v2/posts', {'include': ids.join(','), '_embed': ''});
+      final request = await client.getUrl(uri);
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      final response = await request.close();
+      final body = await response.transform(utf8.decoder).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Saved posts returned ${response.statusCode}');
+      final decoded = jsonDecode(body);
+      return decoded is List ? decoded.whereType<Map>().map((row) => BlogPost.fromJson(Map<String, dynamic>.from(row))).toList() : const [];
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<Map<String, dynamic>?> _loadScorecard(MatchData match) => _scorecardRequests.putIfAbsent(match.matchId, () async {
     if (match.matchId.isEmpty) return null;
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
@@ -759,8 +792,8 @@ class _HomePageState extends State<HomePage> {
   }
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(backgroundColor: AppColors.background, title: Image.asset('assets/logo_spoda.png', height: 32, fit: BoxFit.contain), centerTitle: true, leading: IconButton(onPressed: _openMenu, icon: const Icon(Icons.menu, color: AppColors.acid))),
-    body: _tab == 0 ? _homeDashboard() : _tab == 1 ? _matchPage() : _tab == 2 ? BlogListPage(preloaded: _posts) : const Center(child: Text('Profile')),
+    appBar: AppBar(backgroundColor: AppColors.background, shape: const Border(bottom: BorderSide(color: AppColors.acid, width: 1)), title: Image.asset('assets/logo_spoda.png', height: 24, fit: BoxFit.contain), centerTitle: true, leading: IconButton(onPressed: _openMenu, icon: const Icon(Icons.menu, color: AppColors.acid))),
+    body: _tab == 0 ? _homeDashboard() : _tab == 1 ? _matchPage() : _tab == 2 ? BlogListPage(preloaded: _posts) : ProfilePage(postsLoader: _loadSavedPosts),
     bottomNavigationBar: NavigationBarTheme(
       data: NavigationBarThemeData(
         iconTheme: WidgetStateProperty.resolveWith<IconThemeData?>((states) =>
@@ -795,13 +828,13 @@ class _HomePageState extends State<HomePage> {
           else ..._ordered((matchSnapshot.data ?? []).where((m) => !_isLive(m) && !_isDone(m) && (m.startDate == null || m.startDate!.isAfter(DateTime.now()))).toList()).map(_upcomingCard),
           const SizedBox(height: 16), _sectionHeader('News and Blogs', () => setState(() => _tab = 2)),
           if (postSnapshot.connectionState == ConnectionState.waiting) const SizedBox(height: 120, child: Center(child: CircularProgressIndicator(color: AppColors.acid)))
-          else if (postSnapshot.hasError) TextButton(onPressed: () => setState(() => _posts = _loadPosts(4, 1)), child: const Text('Could not load posts. Tap to retry.'))
+          else if (postSnapshot.hasError) TextButton(onPressed: () => setState(() { _posts = _loadPosts(4, 1); }), child: const Text('Could not load posts. Tap to retry.'))
           else ..._blogPreviews(postSnapshot.data ?? []),
         ]),
       ),
     ),
   );
-  Widget _sectionHeader(String title, VoidCallback action) => Padding(padding: const EdgeInsets.only(top: 18, bottom: 14), child: Row(children: [Expanded(child: Text(title, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800))), InkWell(onTap: action, child: const Row(children: [Text('View All', style: TextStyle(fontSize: 12, color: AppColors.muted)), SizedBox(width: 4), Icon(Icons.chevron_right, size: 20)]))]));
+  Widget _sectionHeader(String title, VoidCallback action, {double topPadding = 18}) => Padding(padding: EdgeInsets.only(top: topPadding, bottom: 14), child: Row(children: [Expanded(child: Text(title, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800))), InkWell(onTap: action, child: const Row(children: [Text('View All', style: TextStyle(fontSize: 12, color: AppColors.muted)), SizedBox(width: 4), Icon(Icons.chevron_right, size: 20)]))]));
   Widget _liveSlider(List<MatchData> matches) {
     if (matches.isEmpty) return const SizedBox.shrink();
     return FutureBuilder<List<Map<String, dynamic>?>>(
@@ -815,8 +848,18 @@ class _HomePageState extends State<HomePage> {
         }
         if (cards.isEmpty) return const SizedBox.shrink();
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _sectionHeader('Live Matches', () => setState(() { _tab = 1; _matchStatus = 0; })),
-          SizedBox(height: 275, child: ListView.separated(
+          _sectionHeader('Live Matches', () => setState(() { _tab = 1; _matchStatus = 0; }), topPadding: 6),
+          SizedBox(height: 275, child: cards.length == 1
+              ? Center(child: SizedBox(
+                  width: MediaQuery.sizeOf(context).width * .82,
+                  child: _LiveMatchCard(
+                    match: cards.single.$1,
+                    live: true,
+                    scorecard: cards.single.$2,
+                    onTap: () => _openMatchDetails(cards.single.$1, cards.single.$2),
+                  ),
+                ))
+              : ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: cards.length,
             separatorBuilder: (_, _) => const SizedBox(width: 10),
@@ -850,7 +893,7 @@ class _HomePageState extends State<HomePage> {
                 const Padding(padding: EdgeInsets.symmetric(horizontal: 8), child: Text('vs', style: TextStyle(color: AppColors.muted))),
                 Expanded(child: _alignedUpcomingTeam(match, 'B', scorecard)),
                 const SizedBox(width: 12), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12),
-                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Padding(padding: const EdgeInsets.only(left: 40), child: Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)))]),
+                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 12))]),
               ]),
             ])),
             Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [
@@ -869,10 +912,10 @@ class _HomePageState extends State<HomePage> {
       if (right) ...[const SizedBox(width: 5), logo],
     ]);
   }
-  void _openMatchDetails(MatchData match, [Map<String, dynamic>? scorecard]) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MatchDetailPage(match: match, scorecard: scorecard)));
+  void _openMatchDetails(MatchData match, [Map<String, dynamic>? scorecard]) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => MatchDetailPage(match: match, scorecard: scorecard, matchesFuture: _matches)));
   Widget _upcomingCardContent(MatchData match, Map<String, dynamic>? scorecard) => InkWell(
         onTap: () => _openMatchDetails(match, scorecard),
-        child: Container(margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Column(children: [Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(match.matchFormatLabel(scorecard), style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(height: 12), Row(children: [Expanded(child: Row(children: [_teamBadge(match, 'A', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('A', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700))), const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('vs', style: TextStyle(color: AppColors.muted))), _teamBadge(match, 'B', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('B', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)))])), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Padding(padding: const EdgeInsets.only(left: 40), child: Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)))])])])), Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [const Expanded(child: Text('•  Match prediction and insights available', style: TextStyle(fontSize: 12, color: Colors.white70))), TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: const Text('Prediction  ›', style: TextStyle(fontWeight: FontWeight.bold)))]) )])));
+        child: Container(margin: const EdgeInsets.only(bottom: 10), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Column(children: [Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(match.matchFormatLabel(scorecard), style: const TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.bold)), const SizedBox(height: 12), Row(children: [Expanded(child: Row(children: [_teamBadge(match, 'A', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('A', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700))), const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('vs', style: TextStyle(color: AppColors.muted))), _teamBadge(match, 'B', scorecard), const SizedBox(width: 8), Flexible(child: Text(match.teamName('B', scorecard: scorecard), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)))])), Container(width: 1, height: 38, color: AppColors.border), const SizedBox(width: 12), Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text(_timeFor(match), style: const TextStyle(color: AppColors.muted, fontSize: 12)), Text(_dateLabel(match), style: const TextStyle(color: AppColors.muted, fontSize: 12))])])])), Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [const Expanded(child: Text('•  Match prediction and insights available', style: TextStyle(fontSize: 12, color: Colors.white70))), TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: const Text('Prediction  ›', style: TextStyle(fontWeight: FontWeight.bold)))]) )])));
   String _dateLabel(MatchData match) {
     final date = match.startDate?.toLocal();
     if (date == null) return 'Upcoming';
@@ -1024,7 +1067,7 @@ class _HomePageState extends State<HomePage> {
                   color: AppColors.acid,
                   onRefresh: () async {
                     final future = _loadMatches();
-                    setState(() => _matches = future);
+                    setState(() { _matches = future; });
                     await future;
                   },
                   child: ListView(
@@ -1042,7 +1085,7 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       );
-  Widget _empty(String text, {bool retry = false}) => Center(child: Padding(padding: const EdgeInsets.all(28), child: Column(mainAxisSize: MainAxisSize.min, children: [Text(text, textAlign: TextAlign.center, style: const TextStyle(color: AppColors.muted)), if (retry) TextButton(onPressed: () => setState(() => _matches = _loadMatches()), child: const Text('Try again'))])));
+  Widget _empty(String text, {bool retry = false}) => Center(child: Padding(padding: const EdgeInsets.all(28), child: Column(mainAxisSize: MainAxisSize.min, children: [Text(text, textAlign: TextAlign.center, style: const TextStyle(color: AppColors.muted)), if (retry) TextButton(onPressed: () => setState(() { _matches = _loadMatches(); }), child: const Text('Try again'))])));
   void _openMenu() => showGeneralDialog<void>(context: context, barrierDismissible: true, barrierLabel: 'Close menu', barrierColor: Colors.black54, transitionDuration: const Duration(milliseconds: 200), pageBuilder: (_, _, _) => Align(alignment: Alignment.centerRight, child: SizedBox(width: MediaQuery.sizeOf(context).width * .84, height: double.infinity, child: _SideMenu(onMatches: () { Navigator.of(context).pop(); setState(() => _tab = 1); }))), transitionBuilder: (_, animation, _, child) => SlideTransition(position: Tween(begin: const Offset(1, 0), end: Offset.zero).animate(animation), child: child));
 }
 
@@ -1092,7 +1135,6 @@ class BlogListPage extends StatefulWidget {
 class _BlogListPageState extends State<BlogListPage> {
   final _scroll = ScrollController();
   final List<BlogPost> _posts = [];
-  final Set<int> _savedPostIds = {};
   var _loading = true;
   var _hasMore = true;
   var _page = 1;
@@ -1472,8 +1514,9 @@ class _MatchCard extends StatelessWidget {
 }
 
 class MatchDetailPage extends StatefulWidget {
-  const MatchDetailPage({super.key, required this.match, this.scorecard});
+  const MatchDetailPage({super.key, required this.match, this.matchesFuture, this.scorecard});
   final MatchData match;
+  final Future<List<MatchData>>? matchesFuture;
   final Map<String, dynamic>? scorecard;
 
   @override
@@ -1481,11 +1524,17 @@ class MatchDetailPage extends StatefulWidget {
 }
 
 class _MatchDetailPageState extends State<MatchDetailPage> {
-  static const _tabs = ['Pre-match', 'Ai Signal', 'Squads', 'Stats', 'Scorecard', 'Overs', 'Commentary'];
+  static const _tabs = ['Pre-match', 'Ask AI', 'Squads', 'Stats', 'Scorecard', 'Overs', 'Commentary'];
   static const _entitySportToken = 'ad51db9391daf53d64be4c4754b762d4';
   static const _prompts = ['Top Runs?', 'Top Performer?', 'Match Winner?'];
   final _question = TextEditingController();
-  late final Future<bool> _isLoggedIn = AuthService.instance.accessToken().then((token) => token != null && token.isNotEmpty);
+  late Future<bool> _isLoggedIn = _checkLogin();
+  final List<({String question, String answer})> _aiMessages = [];
+  final Set<int> _expandedAiAnswers = {};
+  final GlobalKey _latestAiContentKey = GlobalKey();
+  String? _pendingAiQuestion;
+  String _conversationId = '';
+  bool _chatSending = false;
   int _selectedTab = 0;
   int _statsSubtab = 0;
   int _teamRunMatches = 5;
@@ -1519,6 +1568,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   late final Future<Object?> _groundParScore = _loadGroundData('/match-ground-analysis/par-score');
   late final Future<Object?> _groundWickets = _loadGroundData('/match-ground-analysis/wickets-per-innings');
   late final Future<Map<String, dynamic>?> _matchScorecard = _loadDetailScorecard();
+  late final Future<List<(MatchData, Map<String, dynamic>?)>> _switcherRows = _loadSwitcherRows();
   int _scorecardInnings = 0;
   int _commentaryInnings = 0;
   late final List<Future<Map<String, dynamic>?>> _commentaryInningsData = [
@@ -1545,6 +1595,101 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   void initState() {
     super.initState();
     _teamAnalysis = _loadTeamAnalysis();
+  }
+
+  Future<bool> _checkLogin() async {
+    final token = await AuthService.instance.accessToken();
+    return token != null && token.isNotEmpty;
+  }
+
+  Future<bool> _requireLogin() async {
+    if (await _checkLogin()) return true;
+    if (!mounted) return false;
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => LoginPage(onLoggedIn: () {
+      if (mounted) setState(() => _isLoggedIn = Future.value(true));
+    })));
+    final loggedIn = await _checkLogin();
+    if (mounted) setState(() => _isLoggedIn = Future.value(loggedIn));
+    return loggedIn;
+  }
+
+  Future<bool> _ensureMatchUnlocked() async {
+    final matchId = widget.match.matchId.trim();
+    if (matchId.isEmpty) throw const AuthException('This match is missing its match ID.');
+    if ((await AuthService.instance.unlockedMatches()).contains(matchId)) return true;
+
+    final passes = await AuthService.instance.remainingPasses();
+    var eligible = false;
+    if (passes <= 0) eligible = await AuthService.instance.freeTrialEligible();
+    if (!mounted) return false;
+
+    final action = await showDialog<String>(context: context, builder: (dialogContext) => AlertDialog(
+      backgroundColor: AppColors.surface,
+      title: const Text('Unlock this match'),
+      content: Text(passes > 0
+          ? 'Use 1 pass to chat with Spoda AI about this match.'
+          : eligible ? 'Activate your free trial to chat with Spoda AI about this match.' : 'You need a pass to chat with Spoda AI about this match.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+        TextButton(onPressed: () => Navigator.pop(dialogContext, passes > 0 ? 'pass' : eligible ? 'trial' : 'buy'), child: Text(passes > 0 ? 'Unlock match with 1 pass' : eligible ? 'Activate free trial' : 'Buy More Passes', style: const TextStyle(color: AppColors.acid))),
+      ],
+    ));
+    if (!mounted || action == null) return false;
+    if (action == 'buy') {
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MatchPassesPage()));
+      return false;
+    }
+    if (action == 'pass') {
+      await AuthService.instance.usePass(matchId);
+    } else {
+      await AuthService.instance.activateFreeTrial(matchId);
+    }
+    return true;
+  }
+
+  Future<void> _submitAiQuestion({bool openAiTab = false}) async {
+    final question = _question.text.trim();
+    if (question.isEmpty || _chatSending) return;
+    try {
+      if (!await _requireLogin()) return;
+      if (!await _ensureMatchUnlocked()) return;
+      if (!mounted) return;
+      setState(() {
+        _chatSending = true;
+        _pendingAiQuestion = question;
+        _question.clear();
+        _selectedTab = 1;
+      });
+      _scrollLatestAiContentIntoView();
+      final response = await AuthService.instance.sendAgentMessage(
+        collectionId: widget.match.matchId.trim(),
+        question: question,
+        conversationId: _conversationId,
+        isLive: widget.match.status.toLowerCase().contains('live') || widget.match.status.toLowerCase().contains('in progress'),
+      );
+      if (!mounted) return;
+      final answer = (response['widgets'] ?? response['answer'] ?? '').toString();
+      final nextConversation = response['conversationId']?.toString() ?? '';
+      setState(() {
+        _aiMessages.add((question: question, answer: answer));
+        if (nextConversation.isNotEmpty) _conversationId = nextConversation;
+        _pendingAiQuestion = null;
+        _selectedTab = 1;
+      });
+      _scrollLatestAiContentIntoView();
+    } on AuthException catch (error) {
+      if (mounted) {
+        setState(() { _pendingAiQuestion = null; _question.text = question; });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() { _pendingAiQuestion = null; _question.text = question; });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not send your question: $error')));
+      }
+    } finally {
+      if (mounted) setState(() => _chatSending = false);
+    }
   }
 
   Future<Map<String, dynamic>?> _loadDetailScorecard() async {
@@ -1852,35 +1997,118 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   @override
   void dispose() { _question.dispose(); super.dispose(); }
 
+  bool _switcherIsLive(MatchData match) => match.group == 'live' || '${match.status} ${match.raw}'.toLowerCase().contains(RegExp(r'live|in.?progress|innings|stumps'));
+  bool _switcherIsDone(MatchData match) => match.group == 'previous' || '${match.status} ${match.raw}'.toLowerCase().contains(RegExp(r'complete|finished|result|won|abandoned'));
+  String _switcherTitle(MatchData match, [Map<String, dynamic>? scorecard]) {
+    final teamA = match.teamName('A', scorecard: scorecard);
+    final teamB = match.teamName('B', scorecard: scorecard);
+    if (!teamA.toLowerCase().startsWith('team ') && !teamB.toLowerCase().startsWith('team ')) return '$teamA VS $teamB';
+    return match.title.replaceAll(RegExp(r'\s+vs\s+', caseSensitive: false), ' VS ');
+  }
+
+  Future<List<(MatchData, Map<String, dynamic>?)>> _loadSwitcherRows() async {
+    final allMatches = await (widget.matchesFuture ?? Future.value([widget.match]));
+    final matches = allMatches.where((match) => _switcherIsLive(match) || (!_switcherIsDone(match) && (match.startDate == null || match.startDate!.isAfter(DateTime.now())))).toList();
+    if (!matches.any((match) => match.matchId == widget.match.matchId)) matches.add(widget.match);
+    final scorecards = await Future.wait(matches.map(_loadSwitcherScorecard));
+    return List.generate(matches.length, (index) => (matches[index], scorecards[index]));
+  }
+
+  Future<Map<String, dynamic>?> _loadSwitcherScorecard(MatchData match) async {
+    if (match.matchId == widget.match.matchId) return widget.scorecard ?? await _matchScorecard;
+    if (match.matchId.isEmpty) return null;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final uri = Uri.https('api.spoda.ai', '/match-scorecard', {'matchId': match.matchId});
+      final response = await (await client.getUrl(uri)).close();
+      if (response.statusCode < 200 || response.statusCode >= 300) return null;
+      final payload = jsonDecode(await response.transform(utf8.decoder).join());
+      return payload is Map ? Map<String, dynamic>.from(payload) : null;
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Widget _matchTitleMenu() => FutureBuilder<List<(MatchData, Map<String, dynamic>?)>>(
+    future: _switcherRows,
+    builder: (context, snapshot) {
+      final rows = snapshot.data ?? const <(MatchData, Map<String, dynamic>?)>[];
+      final live = rows.where((row) => _switcherIsLive(row.$1)).toList();
+      final upcoming = rows.where((row) => !_switcherIsLive(row.$1) && !_switcherIsDone(row.$1) && (row.$1.startDate == null || row.$1.startDate!.isAfter(DateTime.now()))).toList();
+      final currentRows = rows.where((row) => row.$1.matchId == widget.match.matchId);
+      final current = currentRows.isEmpty ? null : currentRows.first;
+      return PopupMenuButton<MatchData?>(
+        tooltip: 'Switch match',
+        onSelected: (match) {
+          if (match == null || match.matchId == widget.match.matchId) return;
+          Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => MatchDetailPage(match: match, matchesFuture: widget.matchesFuture)));
+        },
+        itemBuilder: (context) => [
+          if (live.isNotEmpty) ...[
+            const PopupMenuItem<MatchData?>(enabled: false, child: Text('LIVE MATCHES', style: TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.w700))),
+            ...live.map((row) => PopupMenuItem<MatchData?>(value: row.$1, child: Text(_switcherTitle(row.$1, row.$2), maxLines: 1, overflow: TextOverflow.ellipsis))),
+          ],
+          if (upcoming.isNotEmpty) ...[
+            const PopupMenuItem<MatchData?>(enabled: false, child: Text('UPCOMING MATCHES', style: TextStyle(color: AppColors.acid, fontSize: 11, fontWeight: FontWeight.w700))),
+            ...upcoming.map((row) => PopupMenuItem<MatchData?>(value: row.$1, child: Text(_switcherTitle(row.$1, row.$2), maxLines: 1, overflow: TextOverflow.ellipsis))),
+          ],
+          if (live.isEmpty && upcoming.isEmpty)
+            const PopupMenuItem<MatchData?>(enabled: false, child: Text('No other live or upcoming matches')),
+        ],
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Flexible(child: Text(_switcherTitle(widget.match, current?.$2 ?? widget.scorecard), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14))),
+          const SizedBox(width: 4),
+          const Icon(Icons.arrow_drop_down, size: 20),
+        ]),
+      );
+    },
+  );
+
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(
           backgroundColor: AppColors.background,
           titleSpacing: 0,
-          title: Text(widget.match.tournament, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14)),
+          title: _matchTitleMenu(),
         ),
         body: SafeArea(child: Column(children: [
           Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 12), child: FutureBuilder<Map<String, dynamic>?>(
             future: _matchScorecard,
             builder: (context, snapshot) {
               final scorecard = snapshot.data ?? widget.scorecard;
+              final startDate = widget.match.startDate;
+              final startingSoon = startDate != null && startDate.isAfter(DateTime.now());
               return Row(children: [
                 Expanded(child: _detailTeam(widget.match, 'A', scorecard: scorecard)),
-                Column(children: [Text(widget.match.status, style: const TextStyle(color: AppColors.acid, fontSize: 11)), const SizedBox(height: 3), Text(widget.match.startDate == null ? 'Match details' : _detailTime(widget.match.startDate!), style: const TextStyle(color: AppColors.muted, fontSize: 11))]),
+                Column(children: [
+                  Text(startingSoon ? 'Starting in' : widget.match.status, style: const TextStyle(color: Color(0xFFFF8D45), fontSize: 16)),
+                  const SizedBox(height: 3),
+                  Text(startingSoon ? _detailCountdown(startDate!) : startDate == null ? 'Match details' : _detailTime(startDate), style: const TextStyle(color: Color(0xFFFF8D45), fontSize: 16)),
+                ]),
                 Expanded(child: _detailTeam(widget.match, 'B', rightAlign: true, scorecard: scorecard)),
               ]);
             },
           )),
-          SizedBox(height: 44, child: ListView.builder(
+          Container(
+            height: 48,
+            decoration: const BoxDecoration(border: Border(top: BorderSide(color: Color(0xFF404040)), bottom: BorderSide(color: Color(0xFF404040)))),
+            child: ListView.builder(
             scrollDirection: Axis.horizontal,
             itemCount: _tabs.length,
-            itemBuilder: (context, i) => InkWell(
-              onTap: () => setState(() => _selectedTab = i),
-              child: SizedBox(width: 104, child: Column(children: [
-                Expanded(child: Center(child: Text(i == 2 && _squadAnnounced ? 'Playing XI' : _tabs[i], maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: _selectedTab == i ? Colors.white : AppColors.muted, fontWeight: _selectedTab == i ? FontWeight.w700 : FontWeight.w400)))),
-                Container(height: 2, color: _selectedTab == i ? AppColors.acid : Colors.transparent),
-              ])),
-            ),
+            itemBuilder: (context, i) {
+              final label = i == 2 && _squadAnnounced ? 'Playing XI' : _tabs[i];
+              return InkWell(
+                onTap: () => setState(() => _selectedTab = i),
+                child: Container(
+                  height: 48,
+                  decoration: BoxDecoration(border: Border(bottom: BorderSide(color: _selectedTab == i ? const Color(0xFFE7FF00) : Colors.transparent, width: 2))),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Center(child: Text(label, maxLines: 1, style: TextStyle(fontSize: 16, color: _selectedTab == i ? const Color(0xFFF1F1F1) : const Color(0xFFA8A8A8), fontWeight: FontWeight.w600))),
+                ),
+              );
+            },
           )),
           Expanded(child: switch (_selectedTab) {
             0 => _preMatchReportContent(),
@@ -1889,7 +2117,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             4 => _scorecardContent(),
             5 => _oversContent(),
             6 => _commentaryContent(),
-            1 => ListView(children: [_askAiSection()]),
+            1 => _askAiTab(),
             _ => const SizedBox.expand(),
           }),
         ])),
@@ -2222,10 +2450,10 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Widget _groundStatsContent() => Column(children: [
     Padding(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-      child: Row(children: [
-        Expanded(child: _statsSubtabChip('Ground', 0)),
+      child: Row(mainAxisAlignment: MainAxisAlignment.start, children: [
+        _statsSubtabChip('Ground', 0),
         const SizedBox(width: 8),
-        Expanded(child: _statsSubtabChip('Team', 1)),
+        _statsSubtabChip('Team', 1),
       ]),
     ),
     Expanded(child: _statsSubtab == 0 ? ListView(
@@ -2275,7 +2503,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         title: 'Run Scored In Phases',
         subtitle: 'Average runs scored while batting in this ground divide in phases',
         future: _groundRunsByPhase,
-        builder: (data) => _RunsPhaseChart(rows: _runsPhaseRows(data), title: _groundTitle(data)),
+        builder: (data) => _runsPhaseChart(rows: _runsPhaseRows(data), title: _groundTitle(data)),
       ),
       const SizedBox(height: 12),
       _groundCard(
@@ -2412,6 +2640,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     onTap: () => setState(() => _statsSubtab = value),
     child: Container(
       height: 34,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
       alignment: Alignment.center,
       decoration: BoxDecoration(color: _statsSubtab == value ? AppColors.acid : AppColors.surface, border: Border.all(color: _statsSubtab == value ? AppColors.acid : AppColors.border)),
       child: Text(label, style: TextStyle(color: _statsSubtab == value ? AppColors.background : AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)),
@@ -2669,7 +2898,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     ]);
   }
 
-  Widget _RunsPhaseChart({required List<_RunsPhase> rows, required String title}) {
+  Widget _runsPhaseChart({required List<_RunsPhase> rows, required String title}) {
     if (rows.isEmpty) return const SizedBox(height: 90, child: Center(child: Text('No run phase data available.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
     return Column(children: [
       Text(title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
@@ -2865,7 +3094,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         if (index == filtered.length) return _askAiSection();
         final player = filtered[index];
         final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? 'Player').toString();
-        final role = (player['role'] ?? player['playingRole'] ?? player['playing_role'] ?? player['position'] ?? '').toString();
+        final role = _squadRoleLabel(player);
         final team = (player['_teamLabel'] ?? player['teamName'] ?? player['team_name'] ?? '').toString();
         final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
         return Container(decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: ListTile(
@@ -2961,7 +3190,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
 
   Widget _squadPlayerRow(Map<String, dynamic> player, {bool alignRight = false}) {
     final name = _playerName(player);
-    final role = (player['role'] ?? player['playingRole'] ?? player['playing_role'] ?? player['position'] ?? 'Player').toString();
+    final role = _squadRoleLabel(player);
     final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
@@ -2983,6 +3212,36 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         ])),
       ]),
     );
+  }
+
+  String _squadRoleLabel(Map<String, dynamic> player) {
+    final roles = player['playingRoles'] ?? player['playingRole'] ?? player['playing_role'] ?? player['role'] ?? player['position'];
+    final roleValues = roles is List ? roles : (roles == null ? const [] : roles.toString().split(RegExp(r'[,/]')));
+    final normalizedRoles = roleValues.map((role) => role.toString().trim().toLowerCase()).toSet();
+
+    Object? style;
+    if (normalizedRoles.contains('wk') || normalizedRoles.contains('wicketkeeper') || normalizedRoles.contains('wicket keeper')) {
+      return 'Wicket Keeper';
+    } else if (normalizedRoles.contains('bowl')) {
+      style = player['longBowlingStyles'];
+    } else if (normalizedRoles.contains('bat') || normalizedRoles.contains('all')) {
+      style = player['longBattingStyles'];
+    }
+
+    if (style is List) {
+      final label = style.map((value) => value.toString()).where((value) => value.trim().isNotEmpty).join(', ');
+      if (label.isNotEmpty) return label;
+    }
+    if (style is Map) {
+      final label = (style['name'] ?? style['label'] ?? style['value'] ?? '').toString().trim();
+      if (label.isNotEmpty) return label;
+    }
+    final label = style?.toString().trim() ?? '';
+    if (label.isNotEmpty && label.toLowerCase() != 'null') return label;
+    if (normalizedRoles.contains('all')) return 'Allrounder';
+    if (normalizedRoles.contains('bowl')) return 'Bowler';
+    if (normalizedRoles.contains('bat')) return 'Batter';
+    return 'Player';
   }
 
   String? _batsmanId(Map<String, dynamic> player) => (player['playerId'] ?? player['player_id'] ?? player['batsmanId'] ?? player['batsman_id'] ?? player['id'])?.toString();
@@ -3107,7 +3366,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return Column(crossAxisAlignment: rightAlign ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
       Row(mainAxisAlignment: rightAlign ? MainAxisAlignment.end : MainAxisAlignment.start, children: [
         if (!rightAlign) ...[badge, const SizedBox(width: 7)],
-        Flexible(child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15))),
+        Flexible(child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 20))),
         if (rightAlign) ...[const SizedBox(width: 7), badge],
       ]),
       if (score != 'Yet to bat')
@@ -3121,11 +3380,120 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return '${hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')} ${local.hour >= 12 ? 'PM' : 'AM'}';
   }
 
-  Widget _askAiSection() => FutureBuilder<bool>(
-      future: _isLoggedIn,
-      builder: (context, snapshot) {
-        if (snapshot.data != true) return const SizedBox.shrink();
-        return Container(
+  String _detailCountdown(DateTime date) {
+    final remaining = date.toLocal().difference(DateTime.now());
+    final hours = remaining.inHours;
+    final minutes = remaining.inMinutes.remainder(60);
+    return '${hours.toString().padLeft(2, '0')}h : ${minutes.toString().padLeft(2, '0')}m';
+  }
+
+  void _scrollLatestAiContentIntoView() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final latestContext = _latestAiContentKey.currentContext;
+      if (mounted && latestContext != null) {
+        Scrollable.ensureVisible(latestContext, alignment: 0, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+      }
+    });
+  }
+
+  Widget _askAiTab() => Column(children: [
+    Expanded(child: _aiMessages.isEmpty && _pendingAiQuestion == null
+        ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Image.asset('assets/ailogo.png', width: 34, height: 34, color: AppColors.acid),
+            const SizedBox(height: 12),
+            const Text('Ask Spoda AI about this match', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 7),
+            const Text('Get match insights and answers in a conversation.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 12)),
+            const SizedBox(height: 14),
+            Wrap(spacing: 7, children: _prompts.map((p) => ActionChip(label: Text(p, style: const TextStyle(fontSize: 11)), onPressed: () => setState(() => _question.text = p), backgroundColor: AppColors.surface, side: const BorderSide(color: AppColors.border))).toList()),
+            const SizedBox(height: 10),
+            FutureBuilder<bool>(future: _isLoggedIn, builder: (context, snapshot) => snapshot.data == true ? const SizedBox.shrink() : OutlinedButton(onPressed: _requireLogin, child: const Text('Log in to chat', style: TextStyle(color: AppColors.acid)))),
+          ])))
+        : ListView.builder(
+            padding: const EdgeInsets.fromLTRB(12, 14, 12, 10),
+            itemCount: _aiMessages.length + (_pendingAiQuestion == null ? 0 : 1),
+            itemBuilder: (context, index) {
+              if (index == _aiMessages.length) {
+                return Column(key: _latestAiContentKey, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  _aiQuestionBubble(_pendingAiQuestion!, canRetry: false),
+                  _aiLoadingCard(),
+                ]);
+              }
+              final message = _aiMessages[index];
+              final answer = _formatAiAnswer(message.answer);
+              final isExpanded = _expandedAiAnswers.contains(index);
+              final hasMore = answer.split('\n').length > 12 || answer.length > 450;
+              return Column(key: _pendingAiQuestion == null && index == _aiMessages.length - 1 ? _latestAiContentKey : null, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                _aiQuestionBubble(message.question, canRetry: true),
+                Row(children: [Image.asset('assets/chat-icon.png', width: 30, height: 30), const SizedBox(width: 7), const Text('Spoda AI', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14))]),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(25, 8, 0, 0),
+                  child: isExpanded
+                      ? SelectableText(answer, style: const TextStyle(fontSize: 13, height: 1.5))
+                      : Text(answer, maxLines: 12, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, height: 1.5)),
+                ),
+                if (hasMore)
+                  Padding(padding: const EdgeInsets.only(left: 25, bottom: 20), child: Align(alignment: Alignment.centerLeft, child: TextButton(
+                    onPressed: () => setState(() => isExpanded ? _expandedAiAnswers.remove(index) : _expandedAiAnswers.add(index)),
+                    style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    child: Text(isExpanded ? 'Show less' : 'Read more', style: const TextStyle(color: AppColors.acid, fontSize: 12)),
+                  )))
+                else
+                  const SizedBox(height: 20),
+              ]);
+            },
+          )),
+    _aiComposer(),
+  ]);
+
+  Widget _aiQuestionBubble(String question, {bool canRetry = false}) => Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+    ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 280),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: const BoxDecoration(color: AppColors.acid, borderRadius: BorderRadius.zero),
+        child: Text(question, style: const TextStyle(color: AppColors.background, fontSize: 12, height: 1.4)),
+      ),
+    ),
+    if (canRetry)
+      Row(mainAxisSize: MainAxisSize.min, children: [
+        IconButton(tooltip: 'Copy question', visualDensity: VisualDensity.compact, onPressed: () async {
+          await Clipboard.setData(ClipboardData(text: question));
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Question copied')));
+        }, icon: const Icon(Icons.copy, size: 17, color: AppColors.muted)),
+        IconButton(tooltip: 'Resend question', visualDensity: VisualDensity.compact, onPressed: _chatSending ? null : () {
+          _question.text = question;
+          _submitAiQuestion();
+        }, icon: const Icon(Icons.replay, size: 19, color: AppColors.muted)),
+      ]),
+    const SizedBox(height: 12),
+  ]);
+
+  Widget _aiLoadingCard() => Padding(
+    padding: const EdgeInsets.only(bottom: 18),
+    child: Row(
+      children: [
+        Image.asset('assets/chat-icon.png', width: 30, height: 30),
+        const SizedBox(width: 7),
+        const Expanded(
+          child: Text('Spoda AI is thinking…', style: TextStyle(fontSize: 12, color: AppColors.muted)),
+        ),
+      ],
+    ),
+  );
+
+  String _formatAiAnswer(String value) => value
+      .replaceAll(RegExp(r'^#{1,6}\s*', multiLine: true), '')
+      .replaceAll('**', '')
+      .replaceAll(RegExp(r'^\s*[-*]\s+', multiLine: true), '• ');
+
+  Widget _aiComposer() => SafeArea(top: false, child: Padding(padding: const EdgeInsets.fromLTRB(10, 6, 10, 8), child: Row(children: [
+    Expanded(child: TextField(controller: _question, minLines: 1, maxLines: 3, textInputAction: TextInputAction.send, onSubmitted: (_) => _submitAiQuestion(), style: const TextStyle(fontSize: 13), decoration: const InputDecoration(hintText: 'Ask anything about cricket...', hintStyle: TextStyle(color: AppColors.muted, fontSize: 12), filled: true, fillColor: AppColors.surface, contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.border), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero)))),
+    const SizedBox(width: 7),
+    SizedBox(width: 42, height: 42, child: IconButton.filled(onPressed: _chatSending ? null : () => _submitAiQuestion(), style: IconButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background, shape: const RoundedRectangleBorder(), padding: EdgeInsets.zero), icon: _chatSending ? const SizedBox(width: 17, height: 17, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.background)) : const Icon(Icons.send, size: 19))),
+  ])));
+
+  Widget _askAiSection() => Container(
         margin: const EdgeInsets.fromLTRB(12, 8, 12, 12),
         padding: const EdgeInsets.fromLTRB(10, 12, 10, 10),
         decoration: BoxDecoration(color: const Color(0xFF080808), border: Border.all(color: AppColors.border)),
@@ -3143,14 +3511,12 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           ))).toList())),
           const SizedBox(height: 8),
           Row(children: [
-            Expanded(child: TextField(controller: _question, style: const TextStyle(fontSize: 12), decoration: const InputDecoration(hintText: 'Ask anything about this match...', hintStyle: TextStyle(color: AppColors.muted, fontSize: 11), filled: true, fillColor: AppColors.surface, contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 10), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.border), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero)))),
+            Expanded(child: TextField(controller: _question, textInputAction: TextInputAction.send, onSubmitted: (_) => _submitAiQuestion(openAiTab: true), style: const TextStyle(fontSize: 12), decoration: const InputDecoration(hintText: 'Ask anything about this match...', hintStyle: TextStyle(color: AppColors.muted, fontSize: 11), filled: true, fillColor: AppColors.surface, contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 10), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.border), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero)))),
             const SizedBox(width: 6),
-            SizedBox(height: 38, width: 38, child: IconButton.filled(onPressed: () {}, style: IconButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background, shape: const RoundedRectangleBorder(), padding: EdgeInsets.zero), icon: const Icon(Icons.send, size: 18))),
+            SizedBox(height: 38, width: 38, child: IconButton.filled(onPressed: _chatSending ? null : () => _submitAiQuestion(openAiTab: true), style: IconButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background, shape: const RoundedRectangleBorder(), padding: EdgeInsets.zero), icon: const Icon(Icons.send, size: 18))),
           ]),
         ]),
         );
-      },
-    );
 
   Widget _askAiStatus(String message, {bool loading = false}) => ListView(children: [
     SizedBox(
@@ -3181,6 +3547,7 @@ class _SideMenuState extends State<_SideMenu> {
       'Terms of Use' => LegalDocumentPage(title: title, assetPath: 'assets/legal/terms_of_use.txt'),
       'Privacy Policy' => LegalDocumentPage(title: title, assetPath: 'assets/legal/privacy_policy.txt'),
       'Help & Support' => const HelpSupportPage(),
+      'Pass History' => const MatchPassesPage(),
       'About Spoda' => const AboutSpodaPage(),
       _ => SimplePage(title: title),
     };
@@ -3789,10 +4156,434 @@ class _PricingPlansPageState extends State<PricingPlansPage> {
 
 }
 
+class ProfilePage extends StatelessWidget {
+  const ProfilePage({super.key, required this.postsLoader});
+  final Future<List<BlogPost>> Function(Set<int>) postsLoader;
+
+  void _open(BuildContext context, Widget page) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+
+  @override
+  Widget build(BuildContext context) {
+    final profile = AuthService.instance.profile ?? const <String, dynamic>{};
+    final name = (profile['fullName'] ?? profile['full_name'] ?? profile['name'] ?? '').toString().trim();
+    final email = (profile['email'] ?? '').toString().trim();
+    final provider = (profile['provider'] ?? profile['authProvider'] ?? profile['auth_provider'] ?? '').toString().trim();
+    final initials = (name.isNotEmpty ? name : email).split(RegExp(r'[@\s.]')).where((part) => part.isNotEmpty).take(2).map((part) => part[0].toUpperCase()).join();
+    return ListView(padding: EdgeInsets.zero, children: [
+      Container(padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(children: [
+        CircleAvatar(radius: 27, backgroundColor: const Color(0xFF252525), child: Text(initials.isEmpty ? 'SP' : initials, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600))),
+        const SizedBox(width: 14),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(email.isEmpty ? (name.isEmpty ? 'Spoda User' : name) : email, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          Text(provider.isEmpty ? (name.isEmpty ? 'Spoda account' : name) : 'Signed in with $provider', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.muted, fontSize: 12)),
+        ])),
+      ])),
+      _profileSection('MY SPODA', [
+        _profileRow(context, Icons.confirmation_num_outlined, 'Match Passes', () => _open(context, const MatchPassesPage())),
+        _profileRow(context, Icons.receipt_long_outlined, 'Purchase History', () => _open(context, const PurchaseHistoryPage())),
+        _profileRow(context, Icons.bookmark_border, 'Saved', () => _open(context, SavedBlogsPage(postsLoader: postsLoader))),
+      ]),
+      _profileSection('ACCOUNT & APP', [
+        _profileRow(context, Icons.verified_user_outlined, 'Account & Security', () => _open(context, AccountSecurityPage(email: email))),
+        _profileRow(context, Icons.notifications_none, 'Notification Settings', () => _open(context, const SettingsPage())),
+        _profileRow(context, Icons.help_outline, 'How to use?', () => _open(context, const HelpSupportPage())),
+      ]),
+      _profileSection('Legal', [
+        _profileRow(context, Icons.article_outlined, 'Term of use', () => _open(context, const LegalDocumentPage(title: 'Terms of Use', assetPath: 'assets/legal/terms_of_use.txt'))),
+        _profileRow(context, Icons.lock_outline, 'Privacy Policy', () => _open(context, const LegalDocumentPage(title: 'Privacy Policy', assetPath: 'assets/legal/privacy_policy.txt'))),
+      ]),
+      const SizedBox(height: 16),
+    ]);
+  }
+
+  Widget _profileSection(String title, List<Widget> rows) => Container(
+    decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))),
+    padding: const EdgeInsets.fromLTRB(16, 16, 16, 9),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Padding(padding: const EdgeInsets.only(bottom: 5), child: Text(title.toUpperCase(), style: const TextStyle(color: AppColors.muted, fontSize: 10))),
+      ...rows,
+    ]),
+  );
+
+  Widget _profileRow(BuildContext context, IconData icon, String title, VoidCallback onTap) => ListTile(
+    contentPadding: EdgeInsets.zero,
+    minLeadingWidth: 24,
+    leading: Icon(icon, size: 21, color: Colors.white),
+    title: Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+    trailing: const Icon(Icons.chevron_right, size: 22),
+    onTap: onTap,
+    visualDensity: const VisualDensity(vertical: -1),
+  );
+}
+
+class MatchPassesPage extends StatefulWidget {
+  const MatchPassesPage({super.key});
+  @override State<MatchPassesPage> createState() => _MatchPassesPageState();
+}
+
+class _MatchPassesPageState extends State<MatchPassesPage> {
+  late Future<int> _passes = AuthService.instance.remainingPasses();
+  late Future<List<Map<String, dynamic>>> _history = AuthService.instance.passHistory(isUsed: true);
+  int _historyVisible = 4;
+  static const _countries = ['INDIA', 'UNITED STATES', 'UNITED KINGDOM', 'AUSTRALIA', 'UAE', 'SOUTH AFRICA'];
+
+  Future<void> _browsePlans() async {
+    final country = await showDialog<String>(context: context, builder: (dialogContext) => SimpleDialog(
+      backgroundColor: AppColors.surface,
+      title: const Text('Choose your country'),
+      children: _countries.map((value) => SimpleDialogOption(onPressed: () => Navigator.pop(dialogContext, value), child: Text(value))).toList(),
+    ));
+    if (!mounted || country == null) return;
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => PricingPlansPage(country: country, state: null)));
+    if (mounted) {
+      setState(() {
+      _passes = AuthService.instance.remainingPasses();
+      _history = AuthService.instance.passHistory(isUsed: true);
+    });
+    }
+  }
+
+  String _historyDate(Map<String, dynamic> pass) {
+    final details = pass['matchDetails'];
+    final start = details is Map ? DateTime.tryParse(details['startDate']?.toString() ?? '') : null;
+    final timestamp = pass['dateOfUse'] ?? pass['dateOfPurchase'];
+    final epoch = timestamp is num ? timestamp.toInt() : int.tryParse(timestamp?.toString() ?? '');
+    final date = start?.toLocal() ?? (epoch == null ? null : DateTime.fromMillisecondsSinceEpoch(epoch * 1000).toLocal());
+    if (date == null) return 'Date unavailable';
+    final now = DateTime.now();
+    final day = date.year == now.year && date.month == now.month && date.day == now.day
+        ? 'Today'
+        : '${date.day.toString().padLeft(2, '0')} ${_month(date.month)}';
+    final hour = date.hour % 12 == 0 ? 12 : date.hour % 12;
+    final time = '${hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')} ${date.hour >= 12 ? 'PM' : 'AM'}';
+    return '$day - $time';
+  }
+
+  String _month(int value) => const ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][value - 1];
+
+  Widget _historyCard(Map<String, dynamic> pass) {
+    final rawDetails = pass['matchDetails'];
+    final details = rawDetails is Map ? rawDetails : const <String, dynamic>{};
+    final title = (details['title'] ?? '').toString().trim();
+    final teamOne = (details['teamName1'] ?? '').toString().trim();
+    final teamTwo = (details['teamName2'] ?? '').toString().trim();
+    final teams = teamOne.isNotEmpty && teamTwo.isNotEmpty ? '$teamOne  vs  $teamTwo' : title.isNotEmpty ? title : 'Match pass used';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 9),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)),
+      child: Row(children: [
+        const Icon(Icons.sports_cricket_outlined, size: 19, color: AppColors.acid),
+        const SizedBox(width: 9),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(teams, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 5),
+          Text(_historyDate(pass), style: const TextStyle(color: AppColors.muted, fontSize: 11)),
+        ])),
+        const SizedBox(width: 8),
+        const Text('- 1 Pass', style: TextStyle(color: AppColors.red, fontSize: 12, fontWeight: FontWeight.w700)),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Match Passes'), backgroundColor: AppColors.surface),
+    body: ListView(padding: const EdgeInsets.all(18), children: [
+      FutureBuilder<int>(future: _passes, builder: (context, snapshot) => Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Icon(Icons.confirmation_num_outlined, color: AppColors.acid, size: 30),
+          const SizedBox(height: 12),
+          Text(snapshot.connectionState == ConnectionState.waiting ? '—' : '${snapshot.data ?? 0}', style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w800)),
+          const Text('Passes remaining', style: TextStyle(color: AppColors.muted, fontSize: 13)),
+          const SizedBox(height: 4),
+          const Text('Each premium action uses 1 pass', style: TextStyle(color: AppColors.muted, fontSize: 11)),
+          if (snapshot.hasError) TextButton(onPressed: () => setState(() => _passes = AuthService.instance.remainingPasses()), child: const Text('Retry')),
+          const SizedBox(height: 14),
+          SizedBox(width: double.infinity, child: ElevatedButton.icon(
+            onPressed: _browsePlans,
+            icon: const Icon(Icons.shopping_cart_outlined, size: 17),
+            label: const Text('Buy More Passes', style: TextStyle(fontWeight: FontWeight.w700)),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()),
+          )),
+        ]),
+      )),
+      const SizedBox(height: 26),
+      const Padding(padding: EdgeInsets.only(bottom: 10), child: Text('USAGE HISTORY', style: TextStyle(color: AppColors.muted, fontSize: 10))),
+      FutureBuilder<List<Map<String, dynamic>>>(future: _history, builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) return const Padding(padding: EdgeInsets.all(22), child: Center(child: CircularProgressIndicator(color: AppColors.acid)));
+        if (snapshot.hasError) {
+          return Column(children: [
+          Padding(padding: const EdgeInsets.symmetric(vertical: 14), child: Text(snapshot.error.toString(), style: const TextStyle(color: AppColors.muted, fontSize: 12))),
+          TextButton(onPressed: () => setState(() => _history = AuthService.instance.passHistory(isUsed: true)), child: const Text('Try again')),
+        ]);
+        }
+        final rows = (snapshot.data ?? const <Map<String, dynamic>>[]).where((pass) => pass['isUsed'] == true || pass['isUsed'].toString().toLowerCase() == 'true').toList();
+        if (rows.isEmpty) return const Padding(padding: EdgeInsets.symmetric(vertical: 18), child: Center(child: Text('No pass usage yet.', style: TextStyle(color: AppColors.muted, fontSize: 12))));
+        final shown = rows.take(_historyVisible).toList();
+        return Column(children: [
+          ...shown.map(_historyCard),
+          if (rows.length > _historyVisible)
+            SizedBox(width: double.infinity, child: OutlinedButton.icon(
+              onPressed: () => setState(() => _historyVisible += 4),
+              icon: const Icon(Icons.expand_more, color: AppColors.acid),
+              label: const Text('View More', style: TextStyle(color: AppColors.acid)),
+            )),
+        ]);
+      }),
+    ]),
+  );
+}
+
+Object? _paymentValue(Map<String, dynamic> payment, List<String> keys) {
+  for (final key in keys) {
+    if (payment[key] != null && payment[key].toString().isNotEmpty) return payment[key];
+  }
+  final normalized = {for (final entry in payment.entries) entry.key.toString().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), ''): entry.value};
+  for (final key in keys) {
+    final value = normalized[key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '')];
+    if (value != null && value.toString().isNotEmpty) return value;
+  }
+  return null;
+}
+
+String _paymentTitle(Map<String, dynamic> payment) {
+  final title = _paymentValue(payment, ['planTitle', 'productName', 'product', 'description', 'name'])?.toString().trim() ?? '';
+  if (title.isNotEmpty) return title;
+  final quantity = _paymentValue(payment, ['numOfPasses', 'passCount', 'quantity', 'passes']);
+  return quantity == null ? 'Match Passes' : '$quantity Passes';
+}
+
+String _paymentAmount(Map<String, dynamic> payment) {
+  final amount = _paymentValue(payment, ['amountPaid', 'amount', 'totalAmount', 'total', 'paidAmount', 'price']);
+  if (amount == null) return '—';
+  final currencyRaw = (_paymentValue(payment, ['currencySymbol', 'currencyCode', 'currency']) ?? 'INR').toString();
+  final symbol = switch (currencyRaw.toUpperCase()) {
+    'INR' => '₹', 'USD' => r'$', 'GBP' => '£', 'EUR' => '€', _ => currencyRaw,
+  };
+  return '$symbol$amount';
+}
+
+DateTime? _paymentDate(Map<String, dynamic> payment) {
+  final raw = _paymentValue(payment, ['date', 'createdAt', 'createdOn', 'paidAt', 'purchasedAt', 'dateOfPurchase', 'timestamp']);
+  if (raw is num) return DateTime.fromMillisecondsSinceEpoch(raw > 9999999999 ? raw.toInt() : raw.toInt() * 1000).toLocal();
+  final text = raw?.toString();
+  if (text == null || text.isEmpty) return null;
+  final numeric = int.tryParse(text);
+  if (numeric != null) return DateTime.fromMillisecondsSinceEpoch(numeric > 9999999999 ? numeric : numeric * 1000).toLocal();
+  return DateTime.tryParse(text)?.toLocal();
+}
+
+String _paymentDateLabel(Map<String, dynamic> payment) {
+  final date = _paymentDate(payment);
+  if (date == null) return 'Date unavailable';
+  final now = DateTime.now();
+  final label = date.year == now.year && date.month == now.month && date.day == now.day
+      ? 'Today'
+      : '${date.day.toString().padLeft(2, '0')} ${const ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][date.month - 1]}';
+  final hour = date.hour % 12 == 0 ? 12 : date.hour % 12;
+  return '$label · ${hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')} ${date.hour >= 12 ? 'PM' : 'AM'}';
+}
+
+String _paymentStatus(Map<String, dynamic> payment) => (_paymentValue(payment, ['status', 'paymentStatus', 'orderStatus', 'transactionStatus']) ?? 'Completed').toString();
+bool _paymentCompleted(Map<String, dynamic> payment) => _paymentStatus(payment).toLowerCase().contains(RegExp(r'complete|paid|success'));
+
+class PurchaseHistoryPage extends StatefulWidget {
+  const PurchaseHistoryPage({super.key});
+  @override State<PurchaseHistoryPage> createState() => _PurchaseHistoryPageState();
+}
+
+class _PurchaseHistoryPageState extends State<PurchaseHistoryPage> {
+  late Future<List<Map<String, dynamic>>> _payments = AuthService.instance.paymentHistory();
+  int _visible = 6;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Purchase History'), backgroundColor: AppColors.surface),
+    body: FutureBuilder<List<Map<String, dynamic>>>(future: _payments, builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: AppColors.acid));
+      if (snapshot.hasError) {
+        return Center(child: Padding(padding: const EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Text(snapshot.error.toString(), textAlign: TextAlign.center, style: const TextStyle(color: AppColors.muted)),
+        const SizedBox(height: 12),
+        TextButton(onPressed: () => setState(() => _payments = AuthService.instance.paymentHistory()), child: const Text('Try again')),
+      ])));
+      }
+      final payments = snapshot.data ?? const <Map<String, dynamic>>[];
+      if (payments.isEmpty) {
+        return const Center(child: Padding(padding: EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.receipt_long_outlined, size: 42, color: AppColors.muted),
+        SizedBox(height: 12),
+        Text('No purchases to show yet', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        SizedBox(height: 6),
+        Text('Your match pass purchases will appear here.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 12)),
+      ])));
+      }
+      final visible = payments.take(_visible).toList();
+      return ListView(padding: const EdgeInsets.all(16), children: [
+        const Padding(padding: EdgeInsets.only(bottom: 12), child: Text('PURCHASE HISTORY', style: TextStyle(color: AppColors.muted, fontSize: 10))),
+        ...visible.map((payment) => _paymentCard(context, payment)),
+        if (payments.length > _visible) SizedBox(width: double.infinity, child: OutlinedButton.icon(
+          onPressed: () => setState(() => _visible += 6),
+          icon: const Icon(Icons.expand_more, color: AppColors.acid),
+          label: const Text('View More', style: TextStyle(color: AppColors.acid)),
+        )),
+      ]);
+
+    }),
+  );
+
+  Widget _paymentCard(BuildContext context, Map<String, dynamic> payment) => InkWell(
+    onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => PurchaseDetailsPage(payment: payment))),
+    child: Container(margin: const EdgeInsets.only(bottom: 9), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)), child: Row(children: [
+      const Icon(Icons.confirmation_num_outlined, size: 20, color: Colors.white),
+      const SizedBox(width: 9),
+      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(_paymentTitle(payment), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 5),
+        Text(_paymentDateLabel(payment), style: const TextStyle(color: AppColors.muted, fontSize: 10)),
+      ])),
+      const SizedBox(width: 8),
+      Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+        Text(_paymentAmount(payment), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 5),
+        Text(_paymentStatus(payment), style: TextStyle(color: _paymentCompleted(payment) ? const Color(0xFF68C45A) : AppColors.muted, fontSize: 10)),
+      ]),
+      const SizedBox(width: 3),
+      const Icon(Icons.chevron_right, size: 20),
+    ])),
+  );
+}
+
+class PurchaseDetailsPage extends StatelessWidget {
+  const PurchaseDetailsPage({super.key, required this.payment});
+  final Map<String, dynamic> payment;
+
+  Widget _detail(String label, Object? value) => Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Row(children: [
+    Expanded(child: Text(label, style: const TextStyle(color: AppColors.muted, fontSize: 12))),
+    const SizedBox(width: 8),
+    Flexible(child: Text(value == null || value.toString().isEmpty ? '—' : value.toString(), textAlign: TextAlign.right, style: const TextStyle(fontSize: 12))),
+  ]));
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _paymentStatus(payment);
+    final orderId = _paymentValue(payment, ['orderId', 'id', 'order_id']);
+    final quantity = _paymentValue(payment, ['numOfPasses', 'passCount', 'quantity', 'passes']);
+    final paymentMethod = _paymentValue(payment, ['paymentMethod', 'method', 'provider', 'paymentType']);
+    final paymentId = _paymentValue(payment, ['paymentId', 'transactionId', 'payment_id', 'transaction_id']);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Purchase Details'), backgroundColor: AppColors.surface),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(border: Border.all(color: AppColors.border)), child: Column(children: [
+          const SizedBox(height: 4),
+          Container(width: 56, height: 56, decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: AppColors.acid)), child: const Icon(Icons.confirmation_num_outlined, color: AppColors.acid, size: 28)),
+          const SizedBox(height: 12),
+          Text(_paymentTitle(payment), textAlign: TextAlign.center, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text(status, style: TextStyle(color: _paymentCompleted(payment) ? const Color(0xFF68C45A) : AppColors.muted, fontSize: 12)),
+          const Divider(color: AppColors.border, height: 30),
+          _detail('Order Id', orderId),
+          _detail('Date', _paymentDateLabel(payment)),
+          _detail('Quantity', quantity == null ? _paymentTitle(payment) : '$quantity Passes'),
+          _detail('Amount Paid', _paymentAmount(payment)),
+          _detail('Payment method', paymentMethod),
+          _detail('Payment ID', paymentId),
+          _detail('Status', status),
+        ])),
+        const SizedBox(height: 14),
+        OutlinedButton(onPressed: () => launchUrl(Uri(scheme: 'mailto', path: 'support@spoda.ai')), style: OutlinedButton.styleFrom(foregroundColor: AppColors.acid, side: const BorderSide(color: AppColors.acid), shape: const RoundedRectangleBorder()), child: const Text('Need Help?')),
+      ]),
+    );
+  }
+}
+
+class SavedBlogsPage extends StatefulWidget {
+  const SavedBlogsPage({super.key, required this.postsLoader});
+  final Future<List<BlogPost>> Function(Set<int>) postsLoader;
+  @override State<SavedBlogsPage> createState() => _SavedBlogsPageState();
+}
+
+class _SavedBlogsPageState extends State<SavedBlogsPage> {
+  late Future<List<BlogPost>> _posts = widget.postsLoader(Set<int>.from(_savedPostIds));
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Saved Blogs'), backgroundColor: AppColors.surface),
+    body: FutureBuilder<List<BlogPost>>(future: _posts, builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(color: AppColors.acid));
+      if (snapshot.hasError) return Center(child: TextButton(onPressed: () => setState(() => _posts = widget.postsLoader(Set<int>.from(_savedPostIds))), child: const Text('Could not load saved blogs. Tap to retry.')));
+      final posts = snapshot.data ?? const <BlogPost>[];
+      if (posts.isEmpty) return const Center(child: Text('No saved blogs yet.', style: TextStyle(color: AppColors.muted)));
+      return ListView.separated(padding: const EdgeInsets.all(14), itemCount: posts.length, separatorBuilder: (_, _) => const SizedBox(height: 8), itemBuilder: (context, index) {
+        final post = posts[index];
+        return Container(color: AppColors.surface, child: ListTile(
+          leading: post.image.isEmpty ? const Icon(Icons.menu_book_outlined, color: AppColors.acid) : Image.network(post.image, width: 54, height: 64, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.menu_book_outlined, color: AppColors.acid)),
+          title: Text(post.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          subtitle: Text(post.excerpt, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.muted, fontSize: 11)),
+          trailing: IconButton(icon: const Icon(Icons.bookmark, color: AppColors.acid), onPressed: () => setState(() { _savedPostIds.remove(post.id); _posts = widget.postsLoader(Set<int>.from(_savedPostIds)); })),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => BlogArticlePage(post: post))),
+        ));
+      });
+    }),
+  );
+}
+
+class BlogArticlePage extends StatelessWidget {
+  const BlogArticlePage({super.key, required this.post});
+  final BlogPost post;
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Blogs'), backgroundColor: AppColors.surface),
+    body: ListView(padding: const EdgeInsets.all(16), children: [
+      if (post.image.isNotEmpty) Image.network(post.image, height: 210, fit: BoxFit.cover, errorBuilder: (_, _, _) => const SizedBox.shrink()),
+      const SizedBox(height: 14),
+      Text(post.title, style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
+      const SizedBox(height: 14),
+      Text(post.content, style: const TextStyle(height: 1.55, color: AppColors.muted)),
+    ]),
+  );
+}
+
+class AccountSecurityPage extends StatefulWidget {
+  const AccountSecurityPage({super.key, required this.email});
+  final String email;
+  @override State<AccountSecurityPage> createState() => _AccountSecurityPageState();
+}
+
+class _AccountSecurityPageState extends State<AccountSecurityPage> {
+  bool _sending = false;
+  Future<void> _sendReset() async {
+    if (widget.email.isEmpty) return;
+    setState(() => _sending = true);
+    try {
+      await AuthService.instance.requestPasswordReset(widget.email);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Password reset link sent to your email.')));
+    } on AuthException catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+    } finally { if (mounted) setState(() => _sending = false); }
+  }
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Account & Security'), backgroundColor: AppColors.surface),
+    body: ListView(padding: const EdgeInsets.all(16), children: [
+      const Text('ACCOUNT', style: TextStyle(color: AppColors.muted, fontSize: 10)),
+      ListTile(contentPadding: EdgeInsets.zero, leading: const Icon(Icons.email_outlined), title: const Text('Email'), subtitle: Text(widget.email.isEmpty ? 'No email on this account' : widget.email, style: const TextStyle(color: AppColors.muted))),
+      const Divider(color: AppColors.border),
+      const ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.lock_outline), title: Text('Password'), subtitle: Text('Send a password reset link to your email.', style: TextStyle(color: AppColors.muted, fontSize: 12))),
+      const SizedBox(height: 8),
+      OutlinedButton(onPressed: widget.email.isEmpty || _sending ? null : _sendReset, child: Text(_sending ? 'Sending…' : 'Reset password')),
+    ]),
+  );
+}
+
 class SettingsPage extends StatefulWidget { const SettingsPage({super.key}); @override State<SettingsPage> createState() => _SettingsPageState(); }
 class _SettingsPageState extends State<SettingsPage> {
   final Map<String, bool> _values = {'Match Reminders': true, 'Live Match Updates': true, 'Prediction Updates': true, 'AI Insights': true, 'News': true, 'Blogs': false, 'Offers & Promotions': true};
-  @override Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Settings'), backgroundColor: AppColors.surface), body: ListView(children: [_section('MATCHES', ['Match Reminders', 'Live Match Updates']), _section('AI & PREDICTIONS', ['Prediction Updates', 'AI Insights']), _section('NEWS & MEDIA', ['News', 'Blogs']), _section('OFFERS', ['Offers & Promotions'])]));
+  @override Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('Notification Settings'), backgroundColor: AppColors.surface), body: ListView(children: [_section('MATCHES', ['Match Reminders', 'Live Match Updates']), _section('AI & PREDICTIONS', ['Prediction Updates', 'AI Insights']), _section('NEWS & MEDIA', ['News', 'Blogs']), _section('OFFERS', ['Offers & Promotions'])]));
   Widget _section(String title, List<String> names) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Padding(padding: const EdgeInsets.fromLTRB(16, 18, 16, 5), child: Text(title, style: const TextStyle(color: AppColors.muted, fontSize: 10))), ...names.map((name) => SwitchListTile(title: Text(name, style: const TextStyle(fontSize: 14)), subtitle: Text(_caption(name), style: const TextStyle(color: AppColors.muted, fontSize: 10)), value: _values[name]!, onChanged: (v) => setState(() => _values[name] = v))), const Divider(color: AppColors.border, height: 1)]);
   String _caption(String name) => switch (name) {'Match Reminders' => 'Get reminded before matches start', 'Live Match Updates' => 'Score, wickets, and key moments', 'Prediction Updates' => 'Get notified when new predictions are available', 'AI Insights' => 'Get notified about important AI match insights', 'News' => 'Breaking news and updates', 'Blogs' => 'New blog posts and articles', _ => 'Discounts, bonus passes, and more'};
 }

@@ -142,6 +142,107 @@ class AuthService {
     }
   }
 
+  Future<List<String>> unlockedMatches() async {
+    final token = await accessToken();
+    if (token == null || token.isEmpty) return const [];
+    final uri = _base.replace(path: '/passes/unlocked-matches', queryParameters: {'_t': DateTime.now().millisecondsSinceEpoch.toString()});
+    try {
+      final response = await _client.get(uri, headers: {'Accept': 'application/json', 'Authorization': 'Bearer $token'});
+      if (response.statusCode < 200 || response.statusCode >= 300) throw AuthException(_message(_decodeMap(response.body), response.statusCode));
+      final data = _decodeMap(response.body)['unlockedMatches'];
+      return data is List ? data.map((value) => value.toString()).toList() : const [];
+    } on AuthException { rethrow; } catch (_) { throw const AuthException('Could not check unlocked matches.'); }
+  }
+
+  Future<bool> freeTrialEligible() async {
+    final token = await accessToken();
+    if (token == null || token.isEmpty) return false;
+    final uri = _base.replace(path: '/passes/free-trial-eligibility', queryParameters: {'_t': DateTime.now().millisecondsSinceEpoch.toString()});
+    try {
+      final response = await _client.get(uri, headers: {'Accept': 'application/json', 'Authorization': 'Bearer $token'});
+      if (response.statusCode < 200 || response.statusCode >= 300) throw AuthException(_message(_decodeMap(response.body), response.statusCode));
+      return _decodeMap(response.body)['trialEligibility'] == true;
+    } on AuthException { rethrow; } catch (_) { throw const AuthException('Could not check free trial eligibility.'); }
+  }
+
+  Future<void> usePass(String matchId) async => _authorizedPost('/passes/use', {'matchId': matchId});
+
+  Future<void> activateFreeTrial(String matchId) async => _authorizedPost('/passes/free-trial-activate', {'matchId': matchId});
+
+  Future<Map<String, dynamic>> sendAgentMessage({required String collectionId, required String question, required String conversationId, required bool isLive}) =>
+      _authorizedPost('/messages/agent', {'collectionId': collectionId, 'question': question, 'conversationId': conversationId, 'isLive': isLive});
+
+  Future<Map<String, dynamic>> _authorizedPost(String path, Map<String, dynamic> body) async {
+    final token = await accessToken();
+    if (token == null || token.isEmpty) throw const AuthException('Please log in to continue.');
+    try {
+      final response = await _client.post(_uri(path), headers: {'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': 'Bearer $token'}, body: jsonEncode(body));
+      final data = response.body.isEmpty ? <String, dynamic>{} : _decodeMap(response.body);
+      if (response.statusCode < 200 || response.statusCode >= 300) throw AuthException(_message(data, response.statusCode));
+      return data;
+    } on AuthException { rethrow; } catch (_) { throw const AuthException('Could not reach Spoda. Check your connection and try again.'); }
+  }
+
+  Future<List<Map<String, dynamic>>> passHistory({bool isUsed = true}) async {
+    final token = await accessToken();
+    if (token == null || token.isEmpty) return const [];
+    final uri = _base.replace(
+      path: '/passes/history',
+      queryParameters: {'isUsed': isUsed.toString()},
+    );
+    try {
+      final response = await _client.get(uri, headers: {
+        'Accept': 'application/json',
+        'Authorization': 'Bearer $token',
+      });
+      if (response.statusCode == 401 || response.statusCode == 403) return const [];
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw AuthException(_message(_decodeMap(response.body), response.statusCode));
+      }
+      final decoded = jsonDecode(response.body);
+      final rows = decoded is Map ? decoded['passHistory'] : null;
+      if (rows is! List) return const [];
+      return rows.whereType<Map>().map((row) => Map<String, dynamic>.from(row)).toList();
+    } on AuthException {
+      rethrow;
+    } catch (_) {
+      throw const AuthException('Could not load pass history. Check your connection and try again.');
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> paymentHistory() async {
+    final token = await accessToken();
+    if (token == null || token.isEmpty) return const [];
+    try {
+      final response = await _client.get(_uri('/payments/history'), headers: {
+        'Accept': 'application/json',
+        'Authorization': 'Bearer $token',
+      });
+      if (response.statusCode == 401 || response.statusCode == 403) return const [];
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw AuthException(_message(_decodeMap(response.body), response.statusCode));
+      }
+      Object? rows = jsonDecode(response.body);
+      for (var depth = 0; depth < 5 && rows is Map; depth++) {
+        Object? next;
+        for (final key in ['paymentHistory', 'payments', 'history', 'items', 'data', 'value']) {
+          if (rows.containsKey(key)) {
+            next = rows[key];
+            break;
+          }
+        }
+        if (next == null) break;
+        rows = next;
+      }
+      if (rows is! List) return const [];
+      return rows.whereType<Map>().map((row) => Map<String, dynamic>.from(row)).toList();
+    } on AuthException {
+      rethrow;
+    } catch (_) {
+      throw const AuthException('Could not load purchase history. Check your connection and try again.');
+    }
+  }
+
   Future<List<Map<String, dynamic>>> pricingPlans({required String country, String? state}) async {
     final query = <String, String>{'country': country};
     if (state != null && state.isNotEmpty) query['state'] = state;

@@ -79,6 +79,8 @@ flutter:
     - assets/vibhu.jpg
     - assets/vivek.png
     - assets/logo_spoda.png
+    - assets/ailogo.png
+    - assets/chat-icon.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
