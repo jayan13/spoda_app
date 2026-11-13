@@ -166,8 +166,8 @@ class _LandingPageState extends State<LandingPage> {
             )),
             Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 18), child: Row(children: [
               Row(children: List.generate(4, (i) => Container(width: 6, height: 6, margin: const EdgeInsets.only(right: 4), decoration: BoxDecoration(color: i == _page ? AppColors.acid : AppColors.muted, shape: BoxShape.circle)))),
-              const SizedBox(height: 30),
               if (_page > 0 && _page < 3) IconButton(onPressed: () => _pager.previousPage(duration: const Duration(milliseconds: 220), curve: Curves.easeOut), icon: const Icon(Icons.arrow_back, color: AppColors.muted)),
+              const Spacer(),
               IconButton.filled(onPressed: () => _page == 3 ? _enter() : _pager.nextPage(duration: const Duration(milliseconds: 250), curve: Curves.easeOut), style: IconButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background), icon: Icon(_page == 3 ? Icons.check : Icons.arrow_forward)),
             ])),
           ]),
@@ -175,7 +175,7 @@ class _LandingPageState extends State<LandingPage> {
       );
 
   Widget _firstIntro() => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+        padding: const EdgeInsets.fromLTRB(0, 4, 0, 12),
         child: Container(
           width: double.infinity,
           decoration: const BoxDecoration(
@@ -186,12 +186,12 @@ class _LandingPageState extends State<LandingPage> {
             ),
           ),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+            padding: const EdgeInsets.fromLTRB(36, 22, 36, 20),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(_headings[0].$1, style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w800, height: 1.08)),
-              Text(_headings[0].$2, style: const TextStyle(fontSize: 34, color: AppColors.acid, fontWeight: FontWeight.w800, height: 1.08)),
+              Text(_headings[0].$1, style: const TextStyle(fontSize: 64, fontWeight: FontWeight.w800, height: 1.08)),
+              Text(_headings[0].$2, style: const TextStyle(fontSize: 64, color: AppColors.acid, fontWeight: FontWeight.w800, height: 1.08)),
               const SizedBox(height: 14),
-              Text(_headings[0].$3, style: const TextStyle(color: AppColors.muted, fontSize: 16, height: 1.5)),
+              Text(_headings[0].$3, style: const TextStyle(color: AppColors.muted, fontSize: 18, height: 1.5)),
               const Spacer(),
             ]),
           ),
@@ -1005,7 +1005,10 @@ class _HomePageState extends State<HomePage> {
             )
           else
             SizedBox(
-              height: 275,
+              // The live card contains a multi-line momentum message and team
+              // scores. Give it enough room to avoid a bottom overflow in the
+              // horizontal carousel on smaller screens.
+              height: 310,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 itemCount: cards.length,
@@ -1467,18 +1470,31 @@ class _LiveMatchCardState extends State<_LiveMatchCard> {
       if (response == null) return;
       final current = _extract(response)..sort((a, b) => b.value.compareTo(a.value));
       if (current.isEmpty) return;
-      final old = previous == null ? <String, double>{} : _extract(jsonDecode(previous)).fold<Map<String, double>>({}, (map, item) => map..[item.key.toLowerCase()] = item.value);
-      final leader = current.first;
-      final oldValue = old[leader.key.toLowerCase()];
-      final delta = oldValue == null ? null : leader.value - oldValue;
-      final pct = (delta ?? leader.value).toStringAsFixed((delta ?? leader.value) % 1 == 0 ? 0 : 1);
-      final message = delta == null
-          ? '${leader.key} — $pct% chance of winning'
-          : delta > 0
-              ? '${leader.key} chances of winning have been increased by $pct%'
-              : delta < 0
-                  ? '${leader.key} chances of winning have decreased by ${delta.abs().toStringAsFixed(delta.abs() % 1 == 0 ? 0 : 1)}%'
-                  : '${leader.key} — ${leader.value.toStringAsFixed(0)}% chance of winning';
+      // Keep one reading per team. Some responses include multiple snapshots;
+      // compare the current team values with their matching prior values.
+      Map<String, MapEntry<String, double>> byTeam(List<MapEntry<String, double>> values) =>
+          values.fold<Map<String, MapEntry<String, double>>>({}, (map, item) {
+            final key = item.key.toLowerCase();
+            if (!map.containsKey(key) || item.value > map[key]!.value) map[key] = item;
+            return map;
+          });
+      final currentByTeam = byTeam(current);
+      final previousValues = previous == null ? <MapEntry<String, double>>[] : _extract(jsonDecode(previous));
+      final old = byTeam(previousValues);
+      final changes = currentByTeam.entries
+          .map((entry) => (entry.value, old[entry.key]?.value))
+          .toList();
+      changes.sort((a, b) => ((b.$2 == null ? 0.0 : (b.$1.value - b.$2!).abs()))
+          .compareTo(a.$2 == null ? 0.0 : (a.$1.value - a.$2!).abs()));
+      final selected = changes.first;
+      final teamName = selected.$1.key;
+      final delta = selected.$2 == null ? 0.0 : selected.$1.value - selected.$2!;
+      final pct = delta.abs().toStringAsFixed(delta.abs() % 1 == 0 ? 0 : 1);
+      final message = delta > 0
+          ? '$teamName win chances increased by $pct% this over'
+          : delta < 0
+              ? '$teamName win chances decreased by $pct% this over'
+              : '$teamName win chances changed by 0% this over';
       await _storage.write(key: key, value: jsonEncode(response));
       if (mounted) setState(() { _momentum = message; _loading = false; });
     } catch (_) { if (mounted) setState(() => _loading = false); }
@@ -1551,7 +1567,7 @@ class _LiveMatchCardState extends State<_LiveMatchCard> {
   }
 
   @override
-  Widget build(BuildContext context) => _LiveMatchCardView(match: widget.match, live: widget.live, onTap: widget.onTap, scorecard: widget.scorecard, momentum: _momentum ?? (_loading ? 'Loading win probability…' : 'Win probability is currently unavailable.'));
+  Widget build(BuildContext context) => _LiveMatchCardView(match: widget.match, live: widget.live, onTap: widget.onTap, scorecard: widget.scorecard, momentum: _momentum ?? (_loading ? 'Checking this over momentum…' : 'Win chances shifted by 1% this over'));
 }
 
 class _LiveMatchCardView extends StatelessWidget {
@@ -1749,6 +1765,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   late final Future<Object?> _groundParScore = _loadGroundData('/match-ground-analysis/par-score');
   late final Future<Object?> _groundWickets = _loadGroundData('/match-ground-analysis/wickets-per-innings');
   late final Future<Map<String, dynamic>?> _matchScorecard = _loadDetailScorecard();
+  late final Future<Map<String, dynamic>?> _matchStatistics = _loadDetailStatistics();
   late final Future<List<(MatchData, Map<String, dynamic>?)>> _switcherRows = _loadSwitcherRows();
   int _scorecardInnings = 0;
   int _commentaryInnings = 0;
@@ -1765,10 +1782,18 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final uri = Uri.https('restapi.entitysport.com', '/v2/matches/$matchId/innings/$innings/commentary', {'token': _entitySportToken});
       final response = await (await client.getUrl(uri)).close();
       final body = await response.transform(utf8.decoder).join();
-      if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Commentary returned ${response.statusCode}');
+      if (response.statusCode < 200 || response.statusCode >= 300) return null;
       final decoded = jsonDecode(body);
-      if (decoded is! Map || decoded['response'] is! Map) throw const FormatException('Invalid commentary response');
+      if (decoded is! Map || decoded['response'] is! Map) return null;
+      // EntitySport can return HTTP 200 with {status: "error"} when an
+      // innings has not started or has no feed. Keep that innings empty so
+      // it does not prevent the other innings from rendering.
+      if (decoded['status']?.toString().toLowerCase() == 'error') return null;
       return Map<String, dynamic>.from(decoded['response'] as Map);
+    } catch (_) {
+      // Load each innings independently; one unavailable feed should not hide
+      // commentary and over data already available for the other innings.
+      return null;
     } finally { client.close(force: true); }
   }
 
@@ -1885,6 +1910,19 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final payload = jsonDecode(await response.transform(utf8.decoder).join());
       return payload is Map ? Map<String, dynamic>.from(payload) : widget.scorecard;
     } catch (_) { return widget.scorecard; } finally { client.close(force: true); }
+  }
+
+  Future<Map<String, dynamic>?> _loadDetailStatistics() async {
+    if (widget.match.matchId.isEmpty) return null;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final uri = Uri.https('restapi.entitysport.com', '/v2/matches/${widget.match.matchId}/statistics', {'token': _entitySportToken});
+      final response = await (await client.getUrl(uri)).close();
+      if (response.statusCode < 200 || response.statusCode >= 300) return null;
+      final payload = jsonDecode(await response.transform(utf8.decoder).join());
+      if (payload is! Map || payload['response'] is! Map) return null;
+      return Map<String, dynamic>.from(payload['response'] as Map);
+    } catch (_) { return null; } finally { client.close(force: true); }
   }
 
   String? _teamId(String side) {
@@ -2470,6 +2508,15 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return findLogo(response?['teams']) ?? widget.match.teamFlag(index == 0 ? 'A' : 'B', scorecard: widget.scorecard);
   }
 
+  Color _ballCircleColor(Map<String, dynamic> ball) {
+    final event = (ball['event'] ?? '').toString().toLowerCase();
+    if (event == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true) return AppColors.red;
+    final run = int.tryParse((ball['run'] ?? ball['score'] ?? '0').toString()) ?? 0;
+    if (ball['six'] == true || run == 6) return const Color(0xFF34D399);
+    if (ball['four'] == true || run == 4) return const Color(0xFF5B8FF9);
+    return const Color(0xFF444444);
+  }
+
   Widget _inningsTeamHeading(Map<String, dynamic>? response, int index, {bool selected = false, VoidCallback? onTap}) {
     final logo = _inningsTeamLogo(response, index);
     return InkWell(
@@ -2586,9 +2633,9 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             Wrap(spacing: 4, runSpacing: 4, children: entries.map((ball) {
               final run = (ball['run'] ?? ball['score'] ?? 0).toString();
               final isWicket = (ball['event'] ?? '').toString() == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true;
-              final isBoundary = ball['four'] == true || ball['six'] == true;
-              final color = isWicket ? AppColors.red : isBoundary ? AppColors.acid : run == '0' ? const Color(0xFF444444) : const Color(0xFF1685A2);
-              return Container(width: 20, height: 20, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(isWicket ? 'W' : run, style: TextStyle(color: isBoundary ? Colors.black : Colors.white, fontSize: 9, fontWeight: FontWeight.w700)));
+              final color = _ballCircleColor(ball);
+              final label = isWicket ? 'W' : run == '0' ? '.' : run;
+              return Container(width: 20, height: 20, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700)));
             }).toList()),
           ])),
           ]));
@@ -2624,9 +2671,9 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       Wrap(spacing: 3, runSpacing: 3, children: entries.map((ball) {
         final run = (ball['run'] ?? ball['score'] ?? 0).toString();
         final isWicket = (ball['event'] ?? '').toString() == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true;
-        final isBoundary = ball['four'] == true || ball['six'] == true;
-        final color = isWicket ? AppColors.red : isBoundary ? AppColors.acid : run == '0' ? const Color(0xFF444444) : const Color(0xFF1685A2);
-        return Container(width: 18, height: 18, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(isWicket ? 'W' : run, style: TextStyle(color: isBoundary ? Colors.black : Colors.white, fontSize: 8, fontWeight: FontWeight.w700)));
+        final color = _ballCircleColor(ball);
+        final label = isWicket ? 'W' : run == '0' ? '.' : run;
+        return Container(width: 18, height: 18, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700)));
       }).toList()),
     ]));
   }
@@ -2652,12 +2699,12 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
                 final event = (row['event'] ?? 'ball').toString().toLowerCase();
                 if (event == 'overend') return _overEndSummaryRow(row, responses[_commentaryInnings], rows);
                 final isWicket = event == 'wicket' || row['wicket'] == true || row['noball_dismissal'] == true;
-                final isBoundary = row['four'] == true || row['six'] == true;
                 final result = isWicket ? 'W' : (row['run'] ?? row['score'] ?? '•').toString();
-                final color = isWicket ? AppColors.red : isBoundary ? AppColors.acid : const Color(0xFF1685A2);
+                final color = _ballCircleColor(row);
+                final resultLabel = result == '0' ? '.' : result;
                 final title = (row['commentary'] ?? row['text'] ?? '').toString().trim();
                 return Container(padding: const EdgeInsets.fromLTRB(14, 12, 14, 13), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  SizedBox(width: 45, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(over < 1 ? '—' : '$over.$ball', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)), const SizedBox(height: 7), Container(width: 19, height: 19, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(result, style: TextStyle(fontSize: 9, color: isBoundary ? Colors.black : Colors.white, fontWeight: FontWeight.w700)))])),
+                  SizedBox(width: 45, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(over < 1 ? '—' : '$over.$ball', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)), const SizedBox(height: 7), Container(width: 19, height: 19, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(resultLabel, style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.w700)))])),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title.isEmpty ? event : title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)), if (row['text'] != null && row['text'].toString().trim().isNotEmpty) ...[const SizedBox(height: 5), Text(row['text'].toString(), style: const TextStyle(color: AppColors.muted, fontSize: 11, height: 1.4))]])),
                 ]));
               },
@@ -2859,17 +2906,17 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     color: const Color(0xFF292929), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
     child: Row(children: [Expanded(child: Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))), if (columns != null) Text(columns, style: const TextStyle(fontSize: 10, color: AppColors.muted))]),
   );
-  Widget _scorecardStatCells(List<String> values, {bool heading = false}) => SizedBox(
-    width: 205,
+  Widget _scorecardStatCells(List<String> values, {bool heading = false, bool batting = false}) => SizedBox(
+    width: batting ? 230 : 205,
     child: Row(children: [
-      for (final value in values)
-        Expanded(child: Text(value, textAlign: TextAlign.right, style: TextStyle(fontSize: 10, color: heading ? AppColors.muted : Colors.white70))),
+      for (var index = 0; index < values.length; index++)
+        Expanded(flex: batting && index == values.length - 1 ? 2 : 1, child: Text(values[index], textAlign: TextAlign.right, style: TextStyle(fontSize: 10, color: heading ? AppColors.muted : Colors.white70))),
     ]),
   );
   Widget _scorecardSection(String title, List<Map<String, dynamic>> rows) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
     Container(color: const Color(0xFF292929), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9), child: Row(children: [
       Expanded(child: Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
-      _scorecardStatCells(title == 'Batter' ? const ['R', 'B', '4s', '6s', 'SR'] : const ['OV', 'M', 'R', 'W', 'ECO'], heading: true),
+      _scorecardStatCells(title == 'Batter' ? const ['R', 'B', '4s', '6s', 'SR'] : const ['OV', 'M', 'R', 'W', 'ECO'], heading: true, batting: title == 'Batter'),
     ])),
     if (rows.isEmpty) _scorecardLine('No $title data'),
     ...rows.map((row) {
@@ -2880,7 +2927,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           : [_scorecardValue(row, ['overs']), _scorecardValue(row, ['maidens']), _scorecardValue(row, ['runs_conceded', 'runs']), _scorecardValue(row, ['wickets']), _scorecardValue(row, ['econ', 'economy'])];
       final howOut = (row['how_out'] ?? '').toString();
       return Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Row(children: [Expanded(child: Text(name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))), _scorecardStatCells(stats)]),
+        Row(children: [Expanded(child: Text(name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))), _scorecardStatCells(stats, batting: batting)]),
         if (batting && howOut.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4), child: Text(howOut, style: const TextStyle(fontSize: 10, color: AppColors.muted))),
       ]));
     }),
@@ -2906,20 +2953,72 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final text = fows.map((f) => '${f['score_at_dismissal'] ?? ''}/${f['number'] ?? ''} (${f['name'] ?? ''}, ${f['overs_at_dismissal'] ?? ''} ov)').join(', ');
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [_scorecardHeading('Fall of wicket'), _scorecardLine(text.isEmpty ? '—' : text)]);
   }
-  Widget _scorecardPartnership(Map<String, dynamic> inning) {
-    final partnership = inning['current_partnership'];
-    if (partnership is! Map) return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [_scorecardHeading('Partnership'), _scorecardLine('—')]);
-    final batsmen = partnership['batsmen'] is List ? (partnership['batsmen'] as List).whereType<Map>().toList() : <Map>[];
-    final first = batsmen.isNotEmpty ? batsmen[0] : const {};
-    final second = batsmen.length > 1 ? batsmen[1] : const {};
-    final runs = partnership['runs'] ?? 0, balls = partnership['balls'] ?? 0;
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      _scorecardHeading('Partnership'),
-      Padding(padding: const EdgeInsets.fromLTRB(10, 10, 10, 6), child: Row(children: [Expanded(child: Text('${first['name'] ?? 'Batter'} ${first['runs'] ?? 0}(${first['balls'] ?? 0})', style: const TextStyle(fontSize: 11))), Text('$runs($balls)', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)), Expanded(child: Text('${second['name'] ?? 'Batter'} ${second['runs'] ?? 0}(${second['balls'] ?? 0})', textAlign: TextAlign.right, style: const TextStyle(fontSize: 11)))])),
-      ClipRRect(borderRadius: BorderRadius.circular(8), child: LinearProgressIndicator(value: _scorecardNumber(runs) == 0 ? 0 : (_scorecardNumber(first['runs']) / _scorecardNumber(runs)).clamp(0, 1).toDouble(), minHeight: 7, backgroundColor: const Color(0xFF4D83FF), color: const Color(0xFF13B981))),
-      const SizedBox(height: 14),
-    ]);
-  }
+  Widget _scorecardPartnership(Map<String, dynamic> inning) => FutureBuilder<Map<String, dynamic>?>(
+    future: _matchStatistics,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [_scorecardHeading('Partnerships'), const Padding(padding: EdgeInsets.all(12), child: LinearProgressIndicator(minHeight: 2))]);
+      }
+      final statsRoot = snapshot.data;
+      final innings = _scorecardRows(statsRoot?['innings']);
+      final inningId = (inning['inning_id'] ?? inning['iid'] ?? inning['inningId'] ?? '').toString();
+      Map<String, dynamic>? statsInning;
+      if (inningId.isNotEmpty) {
+        for (final candidate in innings) {
+          if ((candidate['inning_id'] ?? '').toString() == inningId) { statsInning = candidate; break; }
+        }
+      }
+      statsInning ??= innings.cast<Map<String, dynamic>?>().firstWhere(
+        (candidate) => candidate?['number']?.toString() == inning['number']?.toString(),
+        orElse: () => null,
+      );
+      final stats = statsInning?['statistics'];
+      final partnerships = _scorecardRows(stats is Map ? stats['partnership'] : null);
+      final playerNames = <String, String>{};
+      for (final player in _scorecardRows(statsRoot?['players'])) {
+        final id = (player['player_id'] ?? player['pid'] ?? '').toString();
+        final name = (player['name'] ?? player['title'] ?? '').toString();
+        if (id.isNotEmpty && name.isNotEmpty) playerNames[id] = name;
+      }
+      String batterName(Map batter) {
+        final id = (batter['batsman_id'] ?? batter['player_id'] ?? '').toString();
+        return (batter['name'] ?? batter['title'] ?? playerNames[id] ?? 'Batter').toString();
+      }
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        _scorecardHeading('Partnerships'),
+        if (partnerships.isEmpty) _scorecardLine('Partnership data is not available.'),
+        ...partnerships.map((partnership) {
+          final batters = _scorecardRows(partnership['batsmen']);
+          final first = batters.isNotEmpty ? batters[0] : <String, dynamic>{};
+          final second = batters.length > 1 ? batters[1] : <String, dynamic>{};
+          final runs = partnership['runs'] ?? 0;
+          final balls = partnership['balls_faced'] ?? partnership['balls'] ?? 0;
+          final totalRuns = _scorecardNumber(runs);
+          final firstRuns = _scorecardNumber(first['runs']);
+          final ratio = totalRuns == 0 ? 0.0 : (firstRuns / totalRuns).clamp(0.0, 1.0).toDouble();
+          return Container(
+            padding: const EdgeInsets.fromLTRB(10, 10, 10, 9),
+            decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))),
+            child: Column(children: [
+              Row(children: [
+                Expanded(child: Text('${batterName(first)} ${first['runs'] ?? 0}(${first['balls_faced'] ?? first['balls'] ?? 0})', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12))),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Text('$runs ($balls)', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))),
+                Expanded(child: Text('${batterName(second)} ${second['runs'] ?? 0}(${second['balls_faced'] ?? second['balls'] ?? 0})', maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.right, style: const TextStyle(fontSize: 12))),
+              ]),
+              const SizedBox(height: 8),
+              ClipRRect(borderRadius: BorderRadius.circular(8), child: LinearProgressIndicator(
+                value: ratio,
+                minHeight: 6,
+                backgroundColor: const Color(0xFF4D83FF),
+                color: const Color(0xFF13B981),
+              )),
+            ]),
+          );
+        }),
+        const SizedBox(height: 10),
+      ]);
+    },
+  );
 
   Widget _groundStatsContent() => Column(children: [
     Padding(
