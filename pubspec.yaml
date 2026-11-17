@@ -39,6 +39,7 @@ dependencies:
   url_launcher: ^6.3.3
   app_links: ^7.2.2
   webview_flutter: ^4.14.1
+  gpt_markdown: ^1.4.1
 
 dev_dependencies:
   flutter_test:

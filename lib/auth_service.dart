@@ -170,7 +170,7 @@ class AuthService {
   Future<void> activateFreeTrial(String matchId) async => _authorizedPost('/passes/free-trial-activate', {'matchId': matchId});
 
   Future<Map<String, dynamic>> sendAgentMessage({required String collectionId, required String question, required String conversationId, required bool isLive}) =>
-      _authorizedPost('/messages/agent', {'collectionId': collectionId, 'question': question, 'conversationId': conversationId, 'isLive': isLive});
+      _authorizedPost('/messages/agent', {'collectionId': collectionId, 'question': question, 'conversationId': conversationId, if (isLive) 'isLive': true});
 
   Future<Map<String, dynamic>> _authorizedPost(String path, Map<String, dynamic> body) async {
     final token = await accessToken();

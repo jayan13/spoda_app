@@ -7,6 +7,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -628,12 +629,13 @@ class MatchData {
   String get score => _first(raw, ['score', 'result', 'subtitle', 'competition', 'seriesName', 'series_name']) ?? '';
   String get matchId => _first(raw, ['matchId', 'match_id', 'id']) ?? '';
   String teamName(String suffix, {Map<String, dynamic>? scorecard}) {
+    final overviewSide = switch (suffix.toUpperCase()) { 'A' => '1', 'B' => '2', _ => suffix };
     final scorecardTeam = _scorecardTeam(scorecard, suffix);
     if (scorecardTeam?['short_name'] != null && scorecardTeam!['short_name'].toString().isNotEmpty) return scorecardTeam['short_name'].toString();
     if (scorecardTeam?['name'] != null && scorecardTeam!['name'].toString().isNotEmpty) return scorecardTeam['name'].toString();
-    final value = raw['team$suffix'];
+    final value = raw['team$overviewSide'] ?? raw['team$suffix'];
     if (value is Map) return (value['shortName'] ?? value['short_name'] ?? value['name'] ?? 'Team $suffix').toString();
-    return (raw['teamName$suffix'] ?? raw['team$suffix Name'] ?? 'Team $suffix').toString();
+    return (raw['teamName$overviewSide'] ?? raw['teamName$suffix'] ?? raw['team$suffix Name'] ?? 'Team $suffix').toString();
   }
   String teamScore(String suffix, {Map<String, dynamic>? scorecard}) {
     final value = _scorecardTeam(scorecard, suffix)?['scores'];
@@ -682,12 +684,13 @@ class MatchData {
     return null;
   }
   String? teamFlag(String suffix, {Map<String, dynamic>? scorecard}) {
+    final overviewSide = switch (suffix.toUpperCase()) { 'A' => '1', 'B' => '2', _ => suffix };
     final scorecardTeam = _scorecardTeam(scorecard, suffix);
     final scorecardLogo = scorecardTeam?['logo_url'];
     if (scorecardLogo is String && scorecardLogo.isNotEmpty) return scorecardLogo;
-    final value = raw['team$suffix'];
-    if (value is Map) return (value['thumb_url'] ?? value['thumbUrl'] ?? value['flag']).toString();
-    return _first(raw, ['team${suffix}ThumbUrl', 'team${suffix}_thumb_url']);
+    final value = raw['team$overviewSide'] ?? raw['team$suffix'];
+    if (value is Map) return (value['thumb_url'] ?? value['thumbUrl'] ?? value['flag'])?.toString();
+    return _first(raw, ['team${overviewSide}ThumbUrl', 'team${overviewSide}_thumb_url', 'team${suffix}ThumbUrl', 'team${suffix}_thumb_url']);
   }
   Map<String, dynamic>? _scorecardTeam(Map<String, dynamic>? scorecard, String side) {
     if (scorecard == null) return null;
@@ -714,7 +717,11 @@ class MatchData {
   String get tournament => _first(raw, ['seriesName', 'series_name', 'competition', 'title', 'name']) ?? 'MATCH';
   DateTime? get startDate {
     final value = _first(raw, ['startDate', 'start_date', 'dateTimeGMT', 'date', 'start_time', 'startTime']);
-    return value == null ? null : DateTime.tryParse(value);
+    final parsed = value == null ? null : DateTime.tryParse(value);
+    if (parsed == null || parsed.isUtc) return parsed;
+    // Match overview timestamps without an offset represent UTC, not device time.
+    return DateTime.utc(parsed.year, parsed.month, parsed.day, parsed.hour,
+        parsed.minute, parsed.second, parsed.millisecond, parsed.microsecond);
   }
   String _team(String key, String fallback) { final value = raw[key]; if (value is Map) return (value['name'] ?? value['shortName'] ?? value['short_name'] ?? fallback).toString(); return value?.toString() ?? fallback; }
   static String? _first(Map<String, dynamic> data, List<String> keys) { for (final key in keys) { final value = data[key]; if (value is String && value.trim().isNotEmpty) return value; if (value is num) return value.toString(); } return null; }
@@ -749,84 +756,130 @@ class MatchData {
 }
 
 String? _scorecardStatus(Object? value) {
+  // Read the match itself before searching nested competition/innings statuses
+  // or the API envelope's status (which can simply be "ok").
   if (value is Map) {
-    for (final entry in value.entries) {
-      if (entry.key.toString().toLowerCase() == 'status_str') {
-        final status = entry.value?.toString().trim();
-        if (status != null && status.isNotEmpty) return status;
+    final data = value['data'];
+    final response = data is Map ? data['response'] : value['response'];
+    if (response is Map) {
+      final status = response['status_str']?.toString().trim();
+      if (status != null && status.isNotEmpty) return status;
+      switch (response['status']?.toString()) {
+        case '1': return 'Scheduled';
+        case '2': return 'Completed';
+        case '3': return 'Live';
       }
     }
-    for (final child in value.values) {
-      final status = _scorecardStatus(child);
-      if (status != null) return status;
-    }
-  } else if (value is List) {
-    for (final child in value) {
-      final status = _scorecardStatus(child);
-      if (status != null) return status;
-    }
   }
-  return null;
+  String? findStatus(Object? node, Set<String> keys) {
+    if (node is Map) {
+      for (final entry in node.entries) {
+        if (keys.contains(entry.key.toString().toLowerCase())) {
+          final status = entry.value?.toString().trim();
+          if (status != null && status.isNotEmpty) return status;
+        }
+      }
+      for (final child in node.values) {
+        final status = findStatus(child, keys);
+        if (status != null) return status;
+      }
+    } else if (node is List) {
+      for (final child in node) {
+        final status = findStatus(child, keys);
+        if (status != null) return status;
+      }
+    }
+    return null;
+  }
+
+  return findStatus(value, const {'status_str'}) ??
+      findStatus(value, const {'match_status', 'status'});
 }
 
 bool _isLiveStatus(MatchData match, [Map<String, dynamic>? scorecard]) {
   final scoreStatus = _scorecardStatus(scorecard);
   final status = (scoreStatus ?? match.status).toLowerCase();
-  if (RegExp(r'completed|complete|finished|result|abandoned|scheduled|upcoming').hasMatch(status)) return false;
-  return match.group == 'live' || RegExp(r'live|in.?progress|innings|stumps').hasMatch(status);
+  if (_isCompletedLabel(status) || RegExp(r'scheduled|upcoming|not started').hasMatch(status)) return false;
+  if (RegExp(r'live|in.?progress|innings|stumps').hasMatch(status)) return true;
+  if (match.group == 'live') return true;
+  return false;
 }
+
+bool _isCompletedLabel(String status) =>
+    RegExp(r'completed|complete|finished|ended|result|abandoned|no result').hasMatch(status) || status.trim() == '3';
 
 bool _isCompletedStatus(MatchData match, [Map<String, dynamic>? scorecard]) {
   final scoreStatus = _scorecardStatus(scorecard);
   final status = (scoreStatus ?? match.status).toLowerCase();
-  return (scoreStatus == null && match.group == 'previous') || RegExp(r'completed|complete|finished|result|abandoned').hasMatch(status);
+  return (scoreStatus == null && match.group == 'previous') || _isCompletedLabel(status);
 }
 
 bool _isScheduledStatus(MatchData match, [Map<String, dynamic>? scorecard]) {
   final status = _scorecardStatus(scorecard);
   if (status != null) return RegExp(r'scheduled|upcoming|not started').hasMatch(status.toLowerCase());
+  // The overview's today/tomorrow groups remain upcoming until the scorecard
+  // confirms a live or completed match, even if the planned start has passed.
+  if (match.group == 'today' || match.group == 'tomorrow') {
+    return !_isLiveStatus(match) && !_isCompletedStatus(match);
+  }
   return !_isLiveStatus(match) && !_isCompletedStatus(match) &&
       (match.startDate == null || match.startDate!.isAfter(DateTime.now()));
 }
 
 class HomePage extends StatefulWidget { const HomePage({super.key}); @override State<HomePage> createState() => _HomePageState(); }
 class _HomePageState extends State<HomePage> {
-  Timer? _matchesRefreshTimer;
-  bool _refreshingMatches = false;
+  Timer? _scorecardsRefreshTimer;
+  bool _refreshingLiveScorecards = false;
   int _tab = 0;
-  int _matchStatus = 1;
+  int _matchStatus = 0;
   int _filter = 0;
-  final _filters = const ['All', 'Odds', 'T20s', "Int’l", "Men’s", "Women’s"];
+  final _filters = const ["All", "ODIs", "T20s", "Int'l", "Men's", "Women's"];
   final _matchStatuses = const ['Live', 'Upcoming', 'Completed'];
   late Future<List<MatchData>> _matches = _loadMatches();
   late Future<List<BlogPost>> _posts = _loadPosts(4, 1);
   final Map<String, Future<Map<String, dynamic>?>> _scorecardRequests = {};
+  final Map<String, Map<String, dynamic>> _scorecardData = {};
+  final Map<String, Future<List<Map<String, dynamic>?>>> _scorecardBatches = {};
+
+  Future<List<Map<String, dynamic>?>> _scorecardsFor(List<MatchData> matches) {
+    final key = jsonEncode(matches.map((match) => match.matchId).toList());
+    return _scorecardBatches.putIfAbsent(key, () => Future.wait(matches.map(_loadScorecard)));
+  }
   @override
   void initState() {
     super.initState();
-    _matchesRefreshTimer = Timer.periodic(const Duration(minutes: 10), (_) => _refreshMatches());
+    _scorecardsRefreshTimer = Timer.periodic(const Duration(minutes: 1), (_) => _refreshScorecards());
   }
 
   @override
   void dispose() {
-    _matchesRefreshTimer?.cancel();
+    _scorecardsRefreshTimer?.cancel();
     super.dispose();
   }
 
-  Future<void> _refreshMatches() async {
-    if (!mounted || _refreshingMatches) return;
-    _refreshingMatches = true;
+  Future<void> _refreshScorecards() async {
+    if (!mounted || _refreshingLiveScorecards) return;
+    _refreshingLiveScorecards = true;
     try {
-      final matches = await _loadMatches();
-      if (!mounted) return;
-      setState(() {
-        _matches = Future.value(matches);
-        _scorecardRequests.clear();
-      });
+      final matches = await _matches;
+      var needsRebuild = false;
+      for (final match in matches) {
+        if (match.group != 'today' && match.group != 'live' && match.group != 'tomorrow') continue;
+        var scorecard = _scorecardData[match.matchId];
+        final pending = _scorecardRequests[match.matchId];
+        if (scorecard == null && pending != null) scorecard = await pending;
+        // Refresh live matches for current scores, and upcoming matches so a
+        // scorecard status change to Live moves them into the live section.
+        // Completed matches are deliberately left cached and are not polled.
+        if (!_isLive(match, scorecard) && !_isScheduledStatus(match, scorecard)) continue;
+        _scorecardRequests.remove(match.matchId);
+        needsRebuild = true;
+      }
+      if (mounted && needsRebuild) setState(() { _scorecardBatches.clear(); });
     } catch (_) {
-      // Keep the last successful match list if a periodic refresh fails.
+      // Preserve the current cards and scores if the refresh check fails.
     } finally {
-      _refreshingMatches = false;
+      _refreshingLiveScorecards = false;
     }
   }
 
@@ -864,13 +917,21 @@ class _HomePageState extends State<HomePage> {
     if (match.matchId.isEmpty) return null;
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
-      final req = await client.getUrl(Uri.parse('https://api.spoda.ai/match-scorecard?matchId=${Uri.encodeQueryComponent(match.matchId)}'));
-      final response = await req.close();
-      if (response.statusCode < 200 || response.statusCode >= 300) return null;
-      final payload = jsonDecode(await response.transform(utf8.decoder).join());
-      return payload is Map ? Map<String, dynamic>.from(payload) : null;
-    } catch (_) { return null; } finally { client.close(force: true); }
+      final req = await client.getUrl(Uri.parse('https://api.spoda.ai/match-scorecard?matchId=${Uri.encodeQueryComponent(match.matchId)}')).timeout(const Duration(seconds: 8));
+      req.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+      final response = await req.close().timeout(const Duration(seconds: 8));
+      if (response.statusCode < 200 || response.statusCode >= 300) return _scorecardData[match.matchId];
+      final payload = jsonDecode(await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 8)));
+      if (payload is Map) {
+        final scorecard = Map<String, dynamic>.from(payload);
+        _scorecardData[match.matchId] = scorecard;
+        return scorecard;
+      }
+      return _scorecardData[match.matchId];
+    } catch (_) { return _scorecardData[match.matchId]; } finally { client.close(force: true); }
   });
+  Map<String, dynamic>? _scorecardFor(MatchData match, List<Map<String, dynamic>?>? loaded, int index) =>
+      _scorecardData[match.matchId] ?? (loaded != null && index < loaded.length ? loaded[index] : null);
   bool _containsLiveStatus(Object? value) {
     if (value is Map) {
       for (final entry in value.entries) {
@@ -882,7 +943,10 @@ class _HomePageState extends State<HomePage> {
   }
   List<MatchData> _ordered(List<MatchData> rows) {
     final result = [...rows];
-    result.sort((a, b) => (a.startDate ?? DateTime(2100)).compareTo(b.startDate ?? DateTime(2100)));
+    result.sort((a, b) {
+      final dateOrder = (a.startDate ?? DateTime(2100)).compareTo(b.startDate ?? DateTime(2100));
+      return dateOrder != 0 ? dateOrder : a.matchId.compareTo(b.matchId);
+    });
     return result;
   }
   Future<List<MatchData>> _loadMatches() async {
@@ -895,7 +959,9 @@ class _HomePageState extends State<HomePage> {
       debugPrint('[matches-api] HTTP ${response.statusCode}');
       debugPrint('[matches-api] Raw response: $text');
       if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Server returned ${response.statusCode}');
-      final matches = MatchData.decode(jsonDecode(text));
+      final seenIds = <String>{};
+      final matches = MatchData.decode(jsonDecode(text))
+          .where((match) => match.matchId.isEmpty || seenIds.add(match.matchId)).toList();
       debugPrint('[matches-api] Loaded ${matches.length} rows');
       for (var i = 0; i < matches.length; i++) {
         debugPrint('[matches-api] row ${i + 1}: ${jsonEncode(matches[i].raw)}');
@@ -916,8 +982,17 @@ class _HomePageState extends State<HomePage> {
       _ => indexed.where((row) => _isDone(row.$1, row.$2)).map((row) => row.$1).toList(),
     };
     if (_filter == 0) return statusMatches;
-    final filter = _filters[_filter].replaceAll('’', '').toLowerCase();
-    return statusMatches.where((m) => '${m.raw} ${m.score} ${m.title}'.toLowerCase().contains(filter)).toList();
+    return statusMatches.where((match) {
+      final series = (match.raw['seriesLongName'] ?? '').toString().toLowerCase();
+      return switch (_filter) {
+        1 => series.contains('odi'),
+        2 => series.contains('t20'),
+        3 => match.raw['international']?.toString().trim() == '1',
+        4 => !series.contains('women'),
+        5 => series.contains('women'),
+        _ => true,
+      };
+    }).toList();
   }
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -948,8 +1023,25 @@ class _HomePageState extends State<HomePage> {
       future: _posts,
       builder: (context, postSnapshot) => RefreshIndicator(
         color: AppColors.acid,
-        onRefresh: () async { final matches = _loadMatches(); final posts = _loadPosts(4, 1); setState(() { _matches = matches; _posts = posts; _scorecardRequests.clear(); }); await Future.wait([matches, posts]); },
-        child: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 24), children: [
+        onRefresh: () async {
+          final matchesFuture = _loadMatches();
+          final postsFuture = _loadPosts(4, 1);
+          _scorecardRequests.clear();
+          _scorecardBatches.clear();
+          final results = await Future.wait<dynamic>([matchesFuture, postsFuture]);
+          if (!mounted) return;
+          setState(() {
+            _matches = Future.value(results[0] as List<MatchData>);
+            _posts = Future.value(results[1] as List<BlogPost>);
+          });
+        },
+        // Keep the asynchronously sized sections mounted while scrolling. A
+        // lazy list can dispose/recreate a whole section and change its extent.
+        child: SingleChildScrollView(
+          key: const PageStorageKey('home-dashboard'),
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           if (matchSnapshot.hasData)
             _liveSlider(_ordered(matchSnapshot.data ?? [])),
           const SizedBox(height: 24), _sectionHeader('Upcoming', () => setState(() { _tab = 1; _matchStatus = 1; })),
@@ -959,71 +1051,73 @@ class _HomePageState extends State<HomePage> {
           if (postSnapshot.connectionState == ConnectionState.waiting) const SizedBox(height: 120, child: Center(child: CircularProgressIndicator(color: AppColors.acid)))
           else if (postSnapshot.hasError) TextButton(onPressed: () => setState(() { _posts = _loadPosts(4, 1); }), child: const Text('Could not load posts. Tap to retry.'))
           else ..._blogPreviews(postSnapshot.data ?? []),
-        ]),
+        ])),
       ),
     ),
   );
   Widget _sectionHeader(String title, VoidCallback action, {double topPadding = 18}) => Padding(padding: EdgeInsets.only(top: topPadding, bottom: 14), child: Row(children: [Expanded(child: Text(title, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800))), InkWell(onTap: action, child: const Row(children: [Text('View All', style: TextStyle(fontSize: 12, color: AppColors.muted)), SizedBox(width: 4), Icon(Icons.chevron_right, size: 20)]))]));
-  Widget _upcomingMatchCards(List<MatchData> matches) => FutureBuilder<List<Map<String, dynamic>?>>(
-    future: Future.wait(matches.map(_loadScorecard)),
+  Widget _upcomingMatchCards(List<MatchData> matches) {
+    final candidates = matches.where((match) => match.group == 'today' || match.group == 'tomorrow').toList();
+    return FutureBuilder<List<Map<String, dynamic>?>>(
+    future: _scorecardsFor(candidates),
     builder: (context, snapshot) {
-      if (snapshot.connectionState == ConnectionState.waiting) return const SizedBox(height: 70, child: Center(child: CircularProgressIndicator(color: AppColors.acid)));
       final rows = <Widget>[];
-      for (var i = 0; i < matches.length; i++) {
-        final scorecard = snapshot.data != null && i < snapshot.data!.length ? snapshot.data![i] : null;
-        if (_isScheduledStatus(matches[i], scorecard)) rows.add(_upcomingCardAligned(matches[i], scorecard));
+      for (var i = 0; i < candidates.length; i++) {
+        final scorecard = _scorecardFor(candidates[i], snapshot.data, i);
+        if (_isScheduledStatus(candidates[i], scorecard)) {
+          rows.add(KeyedSubtree(
+          key: ValueKey(candidates[i].matchId),
+          child: _upcomingCardAligned(candidates[i], scorecard),
+        ));
+        }
+      }
+      if (snapshot.connectionState == ConnectionState.waiting && rows.isEmpty) {
+        return const SizedBox(height: 70, child: Center(child: CircularProgressIndicator(color: AppColors.acid)));
       }
       if (rows.isEmpty) return const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('No upcoming matches.', style: TextStyle(color: AppColors.muted)));
       return Column(children: rows);
     },
   );
+  }
   Widget _liveSlider(List<MatchData> matches) {
-    if (matches.isEmpty) return const SizedBox.shrink();
+    final candidates = matches.where((match) => match.group == 'today' || match.group == 'live').toList();
+    if (candidates.isEmpty) return const SizedBox.shrink();
     return FutureBuilder<List<Map<String, dynamic>?>>(
-      future: Future.wait(matches.map(_loadScorecard)),
+      future: _scorecardsFor(candidates),
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) return const SizedBox.shrink();
         final cards = <(MatchData, Map<String, dynamic>?)>[];
-        for (var i = 0; i < matches.length; i++) {
-          final scorecard = snapshot.data != null && i < snapshot.data!.length ? snapshot.data![i] : null;
-          if (_isLive(matches[i], scorecard)) {
-            cards.add((matches[i], scorecard));
+        for (var i = 0; i < candidates.length; i++) {
+          final scorecard = _scorecardFor(candidates[i], snapshot.data, i);
+          if (_isLive(candidates[i], scorecard)) {
+            cards.add((candidates[i], scorecard));
           }
+        }
+        if (snapshot.connectionState == ConnectionState.waiting && cards.isEmpty) {
+          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            _sectionHeader('Live Matches', () => setState(() { _tab = 1; _matchStatus = 0; }), topPadding: 6),
+            const SizedBox(height: 150, child: Center(child: CircularProgressIndicator(color: AppColors.acid))),
+          ]);
         }
         if (cards.isEmpty) return const SizedBox.shrink();
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _sectionHeader('Live Matches', () => setState(() { _tab = 1; _matchStatus = 0; }), topPadding: 6),
-          if (cards.length == 1)
-            SizedBox(
-              width: double.infinity,
-              child: _LiveMatchCard(
-                match: cards.first.$1,
-                live: true,
-                scorecard: cards.first.$2,
-                onTap: () => _openMatchDetails(cards.first.$1, cards.first.$2),
-              ),
-            )
-          else
-            SizedBox(
-              // The live card contains a multi-line momentum message and team
-              // scores. Give it enough room to avoid a bottom overflow in the
-              // horizontal carousel on smaller screens.
-              height: 310,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: cards.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 10),
-                itemBuilder: (context, i) => SizedBox(
-                  width: MediaQuery.sizeOf(context).width * .82,
-                  child: _LiveMatchCard(
-                    match: cards[i].$1,
-                    live: true,
-                    scorecard: cards[i].$2,
-                    onTap: () => _openMatchDetails(cards[i].$1, cards[i].$2),
-                  ),
+          SizedBox(
+            height: 310,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: cards.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              itemBuilder: (context, index) => SizedBox(
+                width: MediaQuery.sizeOf(context).width * .82,
+                child: _LiveMatchCard(
+                  match: cards[index].$1,
+                  live: true,
+                  scorecard: cards[index].$2,
+                  onTap: () => _openMatchDetails(cards[index].$1, cards[index].$2),
                 ),
               ),
             ),
+          ),
           const SizedBox(height: 8),
         ]);
       },
@@ -1126,7 +1220,6 @@ class _HomePageState extends State<HomePage> {
               Row(children: [
                 const Icon(Icons.access_time_outlined, size: 16, color: AppColors.muted),
                 const SizedBox(width: 8),
-                const Text('8 min read', style: TextStyle(color: AppColors.muted, fontSize: 11)),
                 const Padding(padding: EdgeInsets.symmetric(horizontal: 10), child: Text('·', style: TextStyle(color: AppColors.muted))),
                 Text(_timeAgo(post.publishedAt), style: const TextStyle(color: AppColors.muted, fontSize: 11)),
               ]),
@@ -1183,7 +1276,7 @@ class _HomePageState extends State<HomePage> {
         ),
       );
   void _showPost(BlogPost post) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => BlogArticlePage(post: post)));
-  String _timeFor(MatchData m) { final d = m.startDate?.toLocal(); if (d == null) return '04:00 PM'; final hour = d.hour % 12 == 0 ? 12 : d.hour % 12; return '${hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')} ${d.hour >= 12 ? 'PM' : 'AM'}'; }
+  String _timeFor(MatchData m) { final d = m.startDate?.toLocal(); if (d == null) return 'Time TBA'; final hour = d.hour % 12 == 0 ? 12 : d.hour % 12; return '${hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')} ${d.hour >= 12 ? 'PM' : 'AM'}'; }
   Widget _teamBadge(MatchData match, String suffix, [Map<String, dynamic>? scorecard]) { final url = match.teamFlag(suffix, scorecard: scorecard); return url == null || url.isEmpty ? const Icon(Icons.shield, size: 24, color: AppColors.muted) : ClipOval(child: Image.network(url, width: 24, height: 24, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 24, color: AppColors.muted))); }
   Widget _matchPage() => Column(
         children: [
@@ -1195,7 +1288,7 @@ class _HomePageState extends State<HomePage> {
                   onTap: () => setState(() => _matchStatus = i),
                   child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [
                     Expanded(child: Center(child: Text(_matchStatuses[i], style: TextStyle(color: _matchStatus == i ? Colors.white : AppColors.muted, fontWeight: _matchStatus == i ? FontWeight.w700 : FontWeight.w500)))),
-                    Container(height: 2, color: _matchStatus == i ? AppColors.acid : Colors.transparent),
+                    FractionallySizedBox(widthFactor: .65, child: Container(height: 2, color: _matchStatus == i ? const Color(0xFFE7FF00) : Colors.transparent)),
                   ]),
                 ),
               )),
@@ -1208,13 +1301,21 @@ class _HomePageState extends State<HomePage> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
               itemCount: _filters.length,
               separatorBuilder: (_, _) => const SizedBox(width: 8),
-              itemBuilder: (_, i) => ChoiceChip(
-                label: Text(_filters[i]),
-                selected: _filter == i,
-                onSelected: (_) => setState(() => _filter = i),
-                selectedColor: AppColors.acid,
-                visualDensity: VisualDensity.compact,
-                labelStyle: TextStyle(color: _filter == i ? AppColors.background : AppColors.muted),
+              itemBuilder: (_, i) => InkWell(
+                onTap: () => setState(() => _filter = i),
+                child: Container(
+                  alignment: Alignment.center,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _filter == i ? const Color(0xFFE7FF00) : const Color(0xFF151515),
+                    border: Border.all(color: _filter == i ? const Color(0xFFE7FF00) : const Color(0xFF333333)),
+                  ),
+                  child: Text(_filters[i], style: TextStyle(
+                    color: _filter == i ? Colors.black : AppColors.muted,
+                    fontSize: 14,
+                    fontWeight: _filter == i ? FontWeight.w600 : FontWeight.w400,
+                  )),
+                ),
               ),
             ),
           ),
@@ -1222,21 +1323,32 @@ class _HomePageState extends State<HomePage> {
             child: FutureBuilder<List<MatchData>>(
               future: _matches,
               builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
+                if (snapshot.connectionState == ConnectionState.waiting && snapshot.data == null) {
                   return const Center(child: CircularProgressIndicator(color: AppColors.acid));
                 }
                 if (snapshot.hasError) {
                   return _empty('Could not load matches. Check your connection and try again.', retry: true);
                 }
                 final allMatches = snapshot.data ?? const <MatchData>[];
+                // The overview endpoint groups active matches under
+                // todaysMatches. Only those rows need scorecard lookups when
+                // the Live tab is selected; querying every historical and
+                // future match at once can cause the live checks to time out.
+                final matchesToCheck = _matchStatus == 0
+                    ? allMatches.where((match) => match.group == 'today' || match.group == 'live').toList()
+                    : allMatches;
                 return FutureBuilder<List<Map<String, dynamic>?>>(
-                  future: Future.wait(allMatches.map(_loadScorecard)),
+                  future: _scorecardsFor(matchesToCheck),
                   builder: (context, scorecardSnapshot) {
-                    if (scorecardSnapshot.connectionState == ConnectionState.waiting) {
+                    if (scorecardSnapshot.connectionState == ConnectionState.waiting &&
+                        !matchesToCheck.any((match) => _scorecardData.containsKey(match.matchId))) {
                       return const Center(child: CircularProgressIndicator(color: AppColors.acid));
                     }
-                    final scorecards = scorecardSnapshot.data ?? const <Map<String, dynamic>?>[];
-                    final filteredMatches = _filtered(allMatches, scorecards);
+                    final scorecards = List<Map<String, dynamic>?>.generate(
+                      matchesToCheck.length,
+                      (index) => _scorecardFor(matchesToCheck[index], scorecardSnapshot.data, index),
+                    );
+                    final filteredMatches = _filtered(matchesToCheck, scorecards);
                     final matches = _matchStatus == 1 ? _ordered(filteredMatches) : filteredMatches;
                     if (matches.isEmpty) {
                       return _empty(allMatches.isEmpty ? 'No matches are available right now.' : 'No matches in this category.');
@@ -1244,16 +1356,18 @@ class _HomePageState extends State<HomePage> {
                     return RefreshIndicator(
                       color: AppColors.acid,
                       onRefresh: () async {
-                        final future = _loadMatches();
-                        setState(() { _matches = future; _scorecardRequests.clear(); });
-                        await future;
+                        final matches = await _loadMatches();
+                        if (!mounted) return;
+                        _scorecardRequests.clear();
+                        _scorecardBatches.clear();
+                        setState(() { _matches = Future.value(matches); });
                       },
                       child: ListView(
                         padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
                         children: [
                           ...matches.map((match) {
-                            final index = allMatches.indexWhere((item) => item.matchId == match.matchId);
-                            return _upcomingCardAligned(match, index >= 0 && index < scorecards.length ? scorecards[index] : null);
+                            final index = matchesToCheck.indexWhere((item) => item.matchId == match.matchId);
+                            return _upcomingCardAligned(match, index >= 0 && index < scorecards.length ? scorecards[index] : _scorecardData[match.matchId]);
                           }),
                         ],
                       ),
@@ -1466,7 +1580,7 @@ class _LiveMatchCardState extends State<_LiveMatchCard> {
           final data = jsonDecode(await result.transform(utf8.decoder).join());
           if (data is Map) response = Map<String, dynamic>.from(data);
         }
-      } finally { client.close(force: true); }
+      } finally { client.close(force: true); } 
       if (response == null) return;
       final current = _extract(response)..sort((a, b) => b.value.compareTo(a.value));
       if (current.isEmpty) return;
@@ -1723,6 +1837,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   static const _tabs = ['Pre-match', 'Ask AI', 'Squads', 'Playing XI', 'Stats', 'Scorecard', 'Overs', 'Commentary'];
   static const _entitySportToken = 'ad51db9391daf53d64be4c4754b762d4';
   static const _prompts = ['Top Runs?', 'Top Performer?', 'Match Winner?'];
+  static const _squadBorder = Color(0xFF404040);
   final _question = TextEditingController();
   late Future<bool> _isLoggedIn = _checkLogin();
   final List<({String question, String answer})> _aiMessages = [];
@@ -1756,7 +1871,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Future<Object?> _bowlerComparison = Future.value(null);
   late final Future<List<Map<String, dynamic>>> _players = _loadPlayers();
   late final Future<List<Map<String, dynamic>>> _matchSquadPlayers = _loadMatchSquadPlayers();
-  late final Future<List<Map<String, dynamic>>> _playingXiPlayers = _matchSquadPlayers.then((players) => players.where((player) => player['_isPlaying11'] == true).toList());
+  late final Future<List<Map<String, dynamic>>> _playingXiPlayers = _matchSquadPlayers;
   late final Future<Object?> _preMatchReport = _loadMatchReport();
   late final Future<Object?> _groundWinningPercentage = _loadGroundData('/match-ground-analysis/winning-percentage');
   late final Future<Object?> _groundRunsByPhase = _loadGroundData('/match-ground-analysis/run-scored-in-phase');
@@ -1764,15 +1879,18 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   late final Future<Object?> _groundBoundaries = _loadGroundData('/match-ground-analysis/boundaries-per-game');
   late final Future<Object?> _groundParScore = _loadGroundData('/match-ground-analysis/par-score');
   late final Future<Object?> _groundWickets = _loadGroundData('/match-ground-analysis/wickets-per-innings');
-  late final Future<Map<String, dynamic>?> _matchScorecard = _loadDetailScorecard();
+  late Future<Map<String, dynamic>?> _matchScorecard;
+  Map<String, dynamic>? _detailScorecardData;
+  bool _refreshingDetailScorecard = false;
   late final Future<Map<String, dynamic>?> _matchStatistics = _loadDetailStatistics();
   late final Future<List<(MatchData, Map<String, dynamic>?)>> _switcherRows = _loadSwitcherRows();
   int _scorecardInnings = 0;
   int _commentaryInnings = 0;
-  late final List<Future<Map<String, dynamic>?>> _commentaryInningsData = [
-    _loadCommentaryInnings(1),
-    _loadCommentaryInnings(2),
-  ];
+  final Set<String> _expandedOvers = <String>{};
+  Timer? _commentaryRefreshTimer;
+  bool _refreshingCommentary = false;
+  List<Future<Map<String, dynamic>?>> _commentaryInningsData = [];
+  final List<Map<String, dynamic>?> _commentaryResponses = [null, null];
 
   Future<Map<String, dynamic>?> _loadCommentaryInnings(int innings) async {
     final matchId = widget.match.matchId.trim();
@@ -1782,18 +1900,20 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final uri = Uri.https('restapi.entitysport.com', '/v2/matches/$matchId/innings/$innings/commentary', {'token': _entitySportToken});
       final response = await (await client.getUrl(uri)).close();
       final body = await response.transform(utf8.decoder).join();
-      if (response.statusCode < 200 || response.statusCode >= 300) return null;
+      if (response.statusCode < 200 || response.statusCode >= 300) return _commentaryResponses[innings - 1];
       final decoded = jsonDecode(body);
-      if (decoded is! Map || decoded['response'] is! Map) return null;
+      if (decoded is! Map || decoded['response'] is! Map) return _commentaryResponses[innings - 1];
       // EntitySport can return HTTP 200 with {status: "error"} when an
       // innings has not started or has no feed. Keep that innings empty so
       // it does not prevent the other innings from rendering.
-      if (decoded['status']?.toString().toLowerCase() == 'error') return null;
-      return Map<String, dynamic>.from(decoded['response'] as Map);
+      if (decoded['status']?.toString().toLowerCase() == 'error') return _commentaryResponses[innings - 1];
+      final responseData = Map<String, dynamic>.from(decoded['response'] as Map);
+      _commentaryResponses[innings - 1] = responseData;
+      return responseData;
     } catch (_) {
       // Load each innings independently; one unavailable feed should not hide
       // commentary and over data already available for the other innings.
-      return null;
+      return _commentaryResponses[innings - 1];
     } finally { client.close(force: true); }
   }
 
@@ -1801,6 +1921,54 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   void initState() {
     super.initState();
     _teamAnalysis = _loadTeamAnalysis();
+    _detailScorecardData = widget.scorecard;
+    _matchScorecard = _loadDetailScorecard();
+    _commentaryInningsData = [_loadCommentaryInnings(1), _loadCommentaryInnings(2)];
+    _startCommentaryRefreshTimer();
+  }
+
+  Future<void> _startCommentaryRefreshTimer() async {
+    final scorecard = widget.scorecard ?? await _matchScorecard;
+    if (!mounted || !_isLiveStatus(widget.match, scorecard)) return;
+    _commentaryRefreshTimer = Timer.periodic(const Duration(minutes: 1), (_) async {
+      await _refreshScorecard();
+      if (mounted && (_selectedTab == 6 || _selectedTab == 7)) await _refreshCommentary();
+    });
+  }
+
+  Future<void> _refreshScorecard() async {
+    if (!mounted || _refreshingDetailScorecard) return;
+    _refreshingDetailScorecard = true;
+    try {
+      final scorecard = await _loadDetailScorecard();
+      if (!mounted) return;
+      if (!_isLiveStatus(widget.match, scorecard)) {
+        _commentaryRefreshTimer?.cancel();
+        return;
+      }
+      setState(() { _matchScorecard = Future.value(scorecard); });
+    } finally {
+      _refreshingDetailScorecard = false;
+    }
+  }
+
+  Future<void> _refreshCommentary() async {
+    if (!mounted || _refreshingCommentary) return;
+    _refreshingCommentary = true;
+    final statusScorecard = _detailScorecardData ?? await _matchScorecard;
+    if (!mounted) {
+      _refreshingCommentary = false;
+      return;
+    }
+    if (!_isLiveStatus(widget.match, statusScorecard)) {
+      _commentaryRefreshTimer?.cancel();
+      _refreshingCommentary = false;
+      return;
+    }
+    final requests = [_loadCommentaryInnings(1), _loadCommentaryInnings(2)];
+    setState(() => _commentaryInningsData = requests);
+    await Future.wait(requests);
+    _refreshingCommentary = false;
   }
 
   Future<bool> _checkLogin() async {
@@ -1812,10 +1980,10 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     if (await _checkLogin()) return true;
     if (!mounted) return false;
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => LoginPage(onLoggedIn: () {
-      if (mounted) setState(() => _isLoggedIn = Future.value(true));
+      if (mounted) setState(() { _isLoggedIn = Future.value(true); });
     })));
     final loggedIn = await _checkLogin();
-    if (mounted) setState(() => _isLoggedIn = Future.value(loggedIn));
+    if (mounted) setState(() { _isLoggedIn = Future.value(loggedIn); });
     return loggedIn;
   }
 
@@ -1860,7 +2028,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       if (!await _requireLogin()) return;
       if (!await _ensureMatchUnlocked()) return;
       if (!mounted) return;
-      final statusScorecard = widget.scorecard ?? await _matchScorecard;
+      final loadedScorecard = await _matchScorecard;
+      final statusScorecard = _detailScorecardData ?? loadedScorecard ?? widget.scorecard;
       if (!mounted) return;
       setState(() {
         _chatSending = true;
@@ -1901,15 +2070,21 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   }
 
   Future<Map<String, dynamic>?> _loadDetailScorecard() async {
-    if (widget.match.matchId.isEmpty) return widget.scorecard;
+    if (widget.match.matchId.isEmpty) return _detailScorecardData ?? widget.scorecard;
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
     try {
       final uri = Uri.https('api.spoda.ai', '/match-scorecard', {'matchId': widget.match.matchId});
-      final response = await (await client.getUrl(uri)).close();
-      if (response.statusCode < 200 || response.statusCode >= 300) return widget.scorecard;
+      final request = await client.getUrl(uri);
+      request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) return _detailScorecardData ?? widget.scorecard;
       final payload = jsonDecode(await response.transform(utf8.decoder).join());
-      return payload is Map ? Map<String, dynamic>.from(payload) : widget.scorecard;
-    } catch (_) { return widget.scorecard; } finally { client.close(force: true); }
+      if (payload is Map) {
+        _detailScorecardData = Map<String, dynamic>.from(payload);
+        return _detailScorecardData;
+      }
+      return _detailScorecardData ?? widget.scorecard;
+    } catch (_) { return _detailScorecardData ?? widget.scorecard; } finally { client.close(force: true); }
   }
 
   Future<Map<String, dynamic>?> _loadDetailStatistics() async {
@@ -2206,7 +2381,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             final id = (squadRow['player_id'] ?? squadRow['playerId'] ?? squadRow['pid'] ?? squadRow['id'])?.toString();
             final profile = id == null ? null : profiles[id];
             final row = <String, dynamic>{
-              if (profile != null) ...profile,
+              ...?profile,
               ...Map<String, dynamic>.from(squadRow),
               '_teamLabel': teamLabel,
               '_isPlaying11': flagValue(squadRow['playing11']) ?? false,
@@ -2235,7 +2410,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final hasPlayerName = map['title'] != null || map['short_name'] != null || map['player_name'] != null || map['playerName'] != null || map['fullName'] != null || map['name'] != null;
       final hasPlayerFields = map['playing_role'] != null || map['role'] != null || map['batting_style'] != null || map['bowling_style'] != null;
       if (hasPlayerName && (hasPlayerId || hasPlayerFields)) {
-        players.add({...map, if (teamLabel != null) '_teamLabel': teamLabel, if (ownFlag != null) '_isPlaying11': ownFlag});
+        players.add({...map, '_teamLabel': ?teamLabel, '_isPlaying11': ?ownFlag});
         return;
       }
       for (final entry in map.entries) {
@@ -2262,7 +2437,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         rows.addAll(_decodePlayers(nested, team));
       } else if (map['player'] is Map) {
         rows.addAll(_decodePlayers(map['player'], team));
-      } else if (map['playerName'] != null || map['player_name'] != null || map['fullName'] != null || map['name'] != null) {
+      } else if (map['title'] != null || map['playerName'] != null || map['player_name'] != null || map['fullName'] != null || map['name'] != null) {
         rows.add({...map, '_teamLabel': ?inheritedTeam});
       } else {
         for (final entry in map.entries) {
@@ -2274,7 +2449,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   }
 
   @override
-  void dispose() { _question.dispose(); super.dispose(); }
+  void dispose() { _commentaryRefreshTimer?.cancel(); _question.dispose(); super.dispose(); }
 
   bool _switcherIsLive(MatchData match, [Map<String, dynamic>? scorecard]) => _isLiveStatus(match, scorecard);
   bool _switcherIsDone(MatchData match, [Map<String, dynamic>? scorecard]) => _isCompletedStatus(match, scorecard);
@@ -2310,8 +2485,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     }
   }
 
-  Future<void> _showMatchPicker(List<(MatchData, Map<String, dynamic>?)> rows) async {
-    List<(MatchData, Map<String, dynamic>?)> groupFor(String group) => rows.where((row) {
+  Future<void> _showMatchPicker() async {
+    List<(MatchData, Map<String, dynamic>?)> groupFor(List<(MatchData, Map<String, dynamic>?)> rows, String group) => rows.where((row) {
       final match = row.$1;
       if (group == 'Today' && (match.group == 'today' || match.group == 'live' || _switcherIsLive(match, row.$2))) return true;
       if (group == 'Tomorrow' && match.group == 'tomorrow') return true;
@@ -2327,9 +2502,6 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       return !isToday && !isTomorrow;
     }).toList();
 
-    final today = groupFor('Today');
-    final tomorrow = groupFor('Tomorrow');
-    final previous = groupFor('Previous');
     final selected = await showModalBottomSheet<(MatchData, Map<String, dynamic>?)>(
       context: context,
       isScrollControlled: true,
@@ -2346,7 +2518,20 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
                 IconButton(onPressed: () => Navigator.pop(sheetContext), icon: const Icon(Icons.close, size: 20)),
               ]),
             ),
-            Expanded(child: ListView(children: [
+            Expanded(child: FutureBuilder<List<(MatchData, Map<String, dynamic>?)>>(
+              future: _switcherRows,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState != ConnectionState.done) {
+                  return const Center(child: CircularProgressIndicator(color: AppColors.acid));
+                }
+                if (snapshot.hasError) {
+                  return const Center(child: Text('Could not load matches.', style: TextStyle(color: AppColors.muted)));
+                }
+                final rows = snapshot.data ?? const <(MatchData, Map<String, dynamic>?)>[];
+                final today = groupFor(rows, 'Today');
+                final tomorrow = groupFor(rows, 'Tomorrow');
+                final previous = groupFor(rows, 'Previous');
+                return ListView(children: [
               for (final section in [('Today', today), ('Tomorrow', tomorrow), ('Previous', previous)]) ...[
                 if (section.$2.isNotEmpty)
                   Padding(padding: const EdgeInsets.fromLTRB(16, 10, 16, 6), child: Text(section.$1, style: const TextStyle(color: AppColors.muted, fontSize: 11))),
@@ -2361,7 +2546,9 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
               ],
               if (today.isEmpty && tomorrow.isEmpty && previous.isEmpty)
                 const Padding(padding: EdgeInsets.all(16), child: Text('No matches available', style: TextStyle(color: AppColors.muted))),
-            ])),
+                ]);
+              },
+            )),
           ]),
         ),
       ),
@@ -2377,7 +2564,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final currentRows = rows.where((row) => row.$1.matchId == widget.match.matchId);
       final current = currentRows.isEmpty ? null : currentRows.first;
       return InkWell(
-        onTap: () => _showMatchPicker(rows),
+        onTap: _showMatchPicker,
         borderRadius: BorderRadius.circular(4),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           Flexible(child: Text(_switcherTitle(widget.match, current?.$2 ?? widget.scorecard), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14))),
@@ -2389,14 +2576,38 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   );
 
   @override
-  Widget build(BuildContext context) => Scaffold(
+  Widget build(BuildContext context) => FutureBuilder<Map<String, dynamic>?>(
+    future: _matchScorecard,
+    builder: (context, snapshot) {
+      final scorecard = snapshot.data ?? _detailScorecardData ?? widget.scorecard;
+      final liveOrCompleted = _isLiveStatus(widget.match, scorecard) ||
+          _isCompletedStatus(widget.match, scorecard);
+      final visibleTabs = List.generate(_tabs.length, (index) => index)
+          .where((index) => liveOrCompleted
+              ? index != 2
+              : index != 3 && index != 5 && index != 6 && index != 7)
+          .toList();
+      final selectedTab = visibleTabs.contains(_selectedTab)
+          ? _selectedTab
+          : liveOrCompleted ? 3 : 0;
+      return Scaffold(
         appBar: AppBar(
-          backgroundColor: AppColors.background,
+          backgroundColor: const Color(0xFF151515),
+          shape: const Border(bottom: BorderSide(color: Color(0xFF303030))),          
+          elevation: 0,
           titleSpacing: 0,
           title: _matchTitleMenu(),
         ),
-        body: SafeArea(child: Column(children: [
-          Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 12), child: FutureBuilder<Map<String, dynamic>?>(
+        body: SafeArea(child: Container(
+          color: const Color(0xFF111111),
+          child: Column(children: [
+          Container(
+            decoration: const BoxDecoration(
+              color: Color(0xFF151515),
+              border: Border(bottom: BorderSide(color: Color(0xFF303030))),
+            ),
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: FutureBuilder<Map<String, dynamic>?>(
             future: _matchScorecard,
             builder: (context, snapshot) {
               final scorecard = snapshot.data ?? widget.scorecard;
@@ -2421,24 +2632,28 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           )), 
           Container(
             height: 48,
-            decoration: const BoxDecoration(border: Border(top: BorderSide(color: Color(0xFF404040)), bottom: BorderSide(color: Color(0xFF404040)))),
+            decoration: BoxDecoration(
+              color: const Color(0xFF121212),
+              border: Border.all(color: const Color(0xFF303030), width: 1),
+            ),
             child: ListView.builder(
             scrollDirection: Axis.horizontal,
-            itemCount: _tabs.length,
-            itemBuilder: (context, i) {
+            itemCount: visibleTabs.length,
+            itemBuilder: (context, index) {
+              final i = visibleTabs[index];
               final label = _tabs[i];
               return InkWell(
                 onTap: () => setState(() => _selectedTab = i),
                 child: Container(
                   height: 48,
-                  decoration: BoxDecoration(border: Border(bottom: BorderSide(color: _selectedTab == i ? const Color(0xFFE7FF00) : Colors.transparent, width: 2))),
+                  decoration: BoxDecoration(border: Border(bottom: BorderSide(color: selectedTab == i ? const Color(0xFFE7FF00) : Colors.transparent, width: 2))),
                   padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Center(child: Text(label, maxLines: 1, style: TextStyle(fontSize: 16, color: _selectedTab == i ? const Color(0xFFF1F1F1) : const Color(0xFFA8A8A8), fontWeight: FontWeight.w600))),
+                  child: Center(child: Text(label, maxLines: 1, style: TextStyle(fontSize: 16, color: selectedTab == i ? const Color(0xFFF1F1F1) : const Color(0xFFA8A8A8), fontWeight: FontWeight.w600))),
                 ),
               );
             },
           )),
-          Expanded(child: switch (_selectedTab) {
+          Expanded(child: switch (selectedTab) {
             0 => _preMatchReportContent(),
             2 => _squadsContent(),
             3 => _playingXiContent(),
@@ -2449,8 +2664,10 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             1 => _askAiTab(),
             _ => const SizedBox.expand(),
           }),
-        ])),
+        ]))),
       );
+    },
+  );
 
   Map<String, dynamic>? _commentaryInning(Map<String, dynamic>? response) => response?['inning'] is Map
       ? Map<String, dynamic>.from(response!['inning'] as Map)
@@ -2476,6 +2693,33 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final full = (inning?['name'] ?? '').toString().replaceFirst(RegExp(r'\s+Inning$', caseSensitive: false), '').trim();
     if (full.isNotEmpty) return full;
     return widget.match.teamName(index == 0 ? 'A' : 'B', scorecard: widget.scorecard);
+  }
+
+  String? _scorecardSideForTeamId(String? teamId, [Object? scorecard]) {
+    if (teamId == null || teamId.isEmpty) return null;
+    String? find(Object? node) {
+      if (node is Map) {
+        for (final key in ['teama', 'teamb']) {
+          final team = node[key];
+          if (team is Map &&
+              (team['team_id'] ?? team['teamId'] ?? team['id'])?.toString() == teamId) {
+            return key == 'teama' ? 'A' : 'B';
+          }
+        }
+        for (final child in node.values) {
+          final side = find(child);
+          if (side != null) return side;
+        }
+      } else if (node is List) {
+        for (final child in node) {
+          final side = find(child);
+          if (side != null) return side;
+        }
+      }
+      return null;
+    }
+
+    return find(scorecard ?? _detailScorecardData ?? widget.scorecard);
   }
 
   String? _inningsTeamLogo(Map<String, dynamic>? response, int index) {
@@ -2538,19 +2782,24 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
 
   Widget _commentaryTeamScoreHeading(Map<String, dynamic>? response, int index, {required bool selected, required VoidCallback onTap}) {
     final inning = _commentaryInning(response);
-    final suffix = index == 0 ? 'A' : 'B';
+    final battingTeamId = inning?['batting_team_id']?.toString();
+    final mappedSide = _scorecardSideForTeamId(battingTeamId);
+    final suffix = mappedSide ?? (index == 0 ? 'A' : 'B');
     final scorecardTeam = widget.match.teamName(suffix, scorecard: widget.scorecard).trim();
     final feedTeam = (inning?['short_name'] ?? inning?['team_short_name'] ?? inning?['shortname'] ?? inning?['name'] ?? '').toString().trim();
     final normalizedFeedTeam = feedTeam.replaceFirst(RegExp(r'\s+Inning$', caseSensitive: false), '').trim();
-    var team = normalizedFeedTeam.isNotEmpty
+    var team = mappedSide != null
+        ? scorecardTeam
+        : normalizedFeedTeam.isNotEmpty
         ? normalizedFeedTeam.split(RegExp(r'\s+')).first
         : scorecardTeam.split(RegExp(r'\s+')).first;
     team = team.replaceFirst(RegExp(r'-W$', caseSensitive: false), '');
     final inningScore = (inning?['scores'] ?? '').toString().trim();
     final scorecardScore = widget.match.teamScore(suffix, scorecard: widget.scorecard);
-    final score = scorecardScore != 'Yet to bat'
-        ? scorecardScore
-        : inningScore.isNotEmpty ? inningScore : scorecardScore;
+    // The commentary innings score belongs to the displayed batting team.
+    // Scorecard team A/B order can differ from the innings order, so prefer
+    // the innings feed to keep the name and score paired correctly.
+    final score = inningScore.isNotEmpty ? inningScore : scorecardScore;
 
     return InkWell(
       onTap: onTap,
@@ -2577,9 +2826,14 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Widget _oversContent() => FutureBuilder<List<Map<String, dynamic>?>>(
     future: Future.wait(_commentaryInningsData),
     builder: (context, snapshot) {
-      if (snapshot.connectionState == ConnectionState.waiting) return _askAiStatus('', loading: true);
-      if (snapshot.hasError || snapshot.data == null) return _askAiStatus('Overs are not available right now.');
-      final responses = snapshot.data!;
+      final responses = List<Map<String, dynamic>?>.generate(2, (index) =>
+          snapshot.data != null && index < snapshot.data!.length
+              ? snapshot.data![index] ?? _commentaryResponses[index]
+              : _commentaryResponses[index]);
+      if (snapshot.connectionState == ConnectionState.waiting && responses.every((response) => response == null)) {
+        return _askAiStatus('', loading: true);
+      }
+      if (snapshot.hasError && responses.every((response) => response == null)) return _askAiStatus('Overs are not available right now.');
       final overMaps = [_oversForInning(responses[0]), _oversForInning(responses[1])];
       final overKeys = <String>{...overMaps[0].keys, ...overMaps[1].keys}.toList()
         ..sort((a, b) => (int.tryParse(a) ?? 0).compareTo(int.tryParse(b) ?? 0));
@@ -2594,10 +2848,12 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             if (index == (overKeys.isEmpty ? 1 : overKeys.length)) return _askAiSection();
             if (overKeys.isEmpty) return const Padding(padding: EdgeInsets.all(20), child: Center(child: Text('No overs yet', style: TextStyle(color: AppColors.muted, fontSize: 11))));
             final over = overKeys[index];
-            return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            final rowExpanded = _expandedOvers.contains('0_$over') || _expandedOvers.contains('1_$over');
+            final rowHeight = rowExpanded ? 150.0 : 42.0;
+            return AnimatedSize(duration: const Duration(milliseconds: 200), curve: Curves.easeInOut, child: SizedBox(height: rowHeight, child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               SizedBox(width: 44, child: Center(child: Text('${(int.tryParse(over) ?? 0) + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)))),
-              for (var i = 0; i < 2; i++) Expanded(child: _oversInningsCell(overMaps[i][over])),
-            ]);
+              for (var i = 0; i < 2; i++) Expanded(child: _oversInningsCell(overMaps[i][over], '${i}_$over', responses[i], overMaps[i], over, rowHeight)),
+            ])));
           },
         )),
       ]);
@@ -2659,31 +2915,38 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return byOver;
   }
 
-  Widget _oversInningsCell(List<Map<String, dynamic>>? entries) {
-    if (entries == null || entries.isEmpty) {
-      return Container(padding: const EdgeInsets.all(10), alignment: Alignment.center, decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))), child: const Text('—', style: TextStyle(color: AppColors.muted, fontSize: 11)));
-    }
+  Widget _oversInningsCell(List<Map<String, dynamic>>? entries, String rowKey, Map<String, dynamic>? response, Map<String, List<Map<String, dynamic>>> inningOvers, String overKey, double rowHeight) {
+    if (entries == null || entries.isEmpty) return Container(height: rowHeight, alignment: Alignment.centerLeft, padding: const EdgeInsets.all(10), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))), child: const Text('—', style: TextStyle(color: AppColors.muted, fontSize: 11)));
     final runs = entries.fold<int>(0, (total, ball) => total + (int.tryParse((ball['run'] ?? ball['score'] ?? 0).toString()) ?? 0));
     final wickets = entries.where((ball) => (ball['event'] ?? '').toString() == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true).length;
-    return Container(padding: const EdgeInsets.all(8), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('$runs/$wickets', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
-      const SizedBox(height: 5),
-      Wrap(spacing: 3, runSpacing: 3, children: entries.map((ball) {
-        final run = (ball['run'] ?? ball['score'] ?? 0).toString();
-        final isWicket = (ball['event'] ?? '').toString() == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true;
-        final color = _ballCircleColor(ball);
-        final label = isWicket ? 'W' : run == '0' ? '.' : run;
-        return Container(width: 18, height: 18, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700)));
-      }).toList()),
-    ]));
+    final currentOver = int.tryParse(overKey) ?? 0;
+    final deliveries = inningOvers.entries.where((entry) => (int.tryParse(entry.key) ?? 0) <= currentOver).expand((entry) => entry.value);
+    final inningsRuns = deliveries.fold<int>(0, (total, ball) => total + (int.tryParse((ball['run'] ?? ball['score'] ?? 0).toString()) ?? 0));
+    final legalBalls = deliveries.where((ball) => ['ball', 'wicket'].contains((ball['event'] ?? 'ball').toString().toLowerCase()) && ball['wide'] != true && ball['noball'] != true).length;
+    final crr = legalBalls == 0 ? 0.0 : inningsRuns * 6 / legalBalls;
+    final bowlerId = entries.map((ball) => (ball['bowler_id'] ?? ball['bowlerId'] ?? ball['bowlerid'] ?? '').toString()).firstWhere((id) => id.isNotEmpty, orElse: () => '');
+    final directName = entries.map((ball) => (ball['bowler_name'] ?? ball['bowlerName'] ?? '').toString().trim()).firstWhere((name) => name.isNotEmpty, orElse: () => '');
+    final bowlerName = directName.isNotEmpty ? directName : _commentaryPlayerName(response?['players'], bowlerId) ?? 'Bowler';
+    final expanded = _expandedOvers.contains(rowKey);
+    return InkWell(onTap: () => setState(() => expanded ? _expandedOvers.remove(rowKey) : _expandedOvers.add(rowKey)), child: Container(height: rowHeight, padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))), child: expanded ? Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+      Text('$runs/$wickets ($runs runs, $wickets ${wickets == 1 ? 'wicket' : 'wickets'})', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)),
+      if (expanded) Wrap(spacing: 3, children: entries.map((ball) { final run = (ball['run'] ?? ball['score'] ?? 0).toString(); final wicket = (ball['event'] ?? '').toString() == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true; final label = wicket ? 'W' : run == '0' ? '.' : run; return Container(width: 16, height: 16, alignment: Alignment.center, decoration: BoxDecoration(color: _ballCircleColor(ball), shape: BoxShape.circle), child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700))); }).toList()),
+      if (expanded) Text('Bowler: $bowlerName', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, color: AppColors.muted)),
+      if (expanded) Text('CRR: ${crr.toStringAsFixed(2)}', maxLines: 1, style: const TextStyle(fontSize: 10, color: AppColors.acid)),
+      
+    ]) : Align(alignment: Alignment.centerLeft, child: Text('$runs/$wickets ($runs runs, $wickets ${wickets == 1 ? 'wicket' : 'wickets'})', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)))));
   }
-
   Widget _commentaryContent() => FutureBuilder<List<Map<String, dynamic>?>>(
     future: Future.wait(_commentaryInningsData),
     builder: (context, snapshot) {
-      if (snapshot.connectionState == ConnectionState.waiting) return _askAiStatus('', loading: true);
-      if (snapshot.hasError || snapshot.data == null) return _askAiStatus('Commentary is not available right now.');
-      final responses = snapshot.data!;
+      final responses = List<Map<String, dynamic>?>.generate(2, (index) =>
+          snapshot.data != null && index < snapshot.data!.length
+              ? snapshot.data![index] ?? _commentaryResponses[index]
+              : _commentaryResponses[index]);
+      if (snapshot.connectionState == ConnectionState.waiting && responses.every((response) => response == null)) {
+        return _askAiStatus('', loading: true);
+      }
+      if (snapshot.hasError && responses.every((response) => response == null)) return _askAiStatus('Commentary is not available right now.');
       final rows = _commentaryRows(responses[_commentaryInnings]);
       return Column(children: [
         Row(mainAxisAlignment: MainAxisAlignment.start, children: [for (var i = 0; i < 2; i++) _commentaryTeamScoreHeading(responses[i], i, selected: _commentaryInnings == i, onTap: () => setState(() => _commentaryInnings = i))]),
@@ -2694,8 +2957,15 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
               itemBuilder: (context, index) {
                 if (index == rows.length) return _askAiSection();
                 final row = rows[rows.length - index - 1];
-                final over = (int.tryParse(row['over']?.toString() ?? '') ?? -1) + 1;
-                final ball = row['ball']?.toString() ?? '';
+                final rawOver = row['over'] ?? row['over_number'] ?? row['overNumber'] ?? row['over_no'];
+                final overParts = rawOver?.toString().trim().split('.') ?? const <String>[];
+                final over = overParts.isEmpty ? null : int.tryParse(overParts.first);
+                final ball = overParts.length > 1
+                    ? overParts[1]
+                    : (row['ball'] ?? row['ball_number'] ?? row['ballNumber'] ?? row['ball_no'])?.toString();
+                final overLabel = over == null
+                    ? '—'
+                    : ball == null || ball.isEmpty ? '$over' : '$over.$ball';
                 final event = (row['event'] ?? 'ball').toString().toLowerCase();
                 if (event == 'overend') return _overEndSummaryRow(row, responses[_commentaryInnings], rows);
                 final isWicket = event == 'wicket' || row['wicket'] == true || row['noball_dismissal'] == true;
@@ -2704,7 +2974,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
                 final resultLabel = result == '0' ? '.' : result;
                 final title = (row['commentary'] ?? row['text'] ?? '').toString().trim();
                 return Container(padding: const EdgeInsets.fromLTRB(14, 12, 14, 13), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  SizedBox(width: 45, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(over < 1 ? '—' : '$over.$ball', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)), const SizedBox(height: 7), Container(width: 19, height: 19, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(resultLabel, style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.w700)))])),
+                  SizedBox(width: 45, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(overLabel, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)), const SizedBox(height: 7), Container(width: 19, height: 19, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(resultLabel, style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.w700)))])),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title.isEmpty ? event : title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)), if (row['text'] != null && row['text'].toString().trim().isNotEmpty) ...[const SizedBox(height: 5), Text(row['text'].toString(), style: const TextStyle(color: AppColors.muted, fontSize: 11, height: 1.4))]])),
                 ]));
               },
@@ -2840,8 +3110,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Widget _scorecardContent() => FutureBuilder<Map<String, dynamic>?>(
     future: _matchScorecard,
     builder: (context, snapshot) {
-      if (snapshot.connectionState == ConnectionState.waiting) return _askAiStatus('', loading: true);
-      final root = snapshot.data;
+      if (snapshot.connectionState == ConnectionState.waiting && _detailScorecardData == null) return _askAiStatus('', loading: true);
+      final root = snapshot.data ?? _detailScorecardData;
       final data = root?['data'];
       final response = data is Map ? data['response'] : null;
       final inningsRaw = response is Map ? response['innings'] : null;
@@ -2860,9 +3130,11 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             final active = index == selected;
             final tabInning = innings[index];
             final team = _scorecardShortTeamName(tabInning);
-            final suffix = index == 0 ? 'A' : 'B';
+            final teamId = (tabInning['batting_team_id'] ?? tabInning['team_id'] ?? tabInning['teamId'])?.toString();
+            final suffix = _scorecardSideForTeamId(teamId, root) ?? (index == 0 ? 'A' : 'B');
             final teamScore = widget.match.teamScore(suffix, scorecard: root);
-            final score = teamScore != 'Yet to bat' ? teamScore : (tabInning['scores'] ?? '').toString();
+            final inningsScore = (tabInning['scores'] ?? '').toString().trim();
+            final score = inningsScore.isNotEmpty ? inningsScore : teamScore;
             return InkWell(onTap: () => setState(() => _scorecardInnings = index), child: Container(
               width: 128, height: 36, margin: const EdgeInsets.only(right: 5),
               alignment: Alignment.center, color: active ? AppColors.acid : const Color(0xFF171717),
@@ -3022,7 +3294,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
 
   Widget _groundStatsContent() => Column(children: [
     Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
       child: Row(mainAxisAlignment: MainAxisAlignment.start, children: [
         _statsSubtabChip('Ground', 0),
         const SizedBox(width: 8),
@@ -3038,14 +3310,15 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         future: _groundParScore,
         builder: (data) {
           final average = _numberFor(data, const ['battingFirst', 'batting_first']);
-          final remaining = _numberFor(data, const ['remaining']);
-          final highest = average != null && remaining != null ? average + remaining : null;
-          final lowest = average != null && highest != null ? average - (highest - average) : null;
+          final roundedAverage = average?.round();
+          final remaining = _numberFor(data, const ['remaining'])?.round();
+          final highest = roundedAverage != null && remaining != null ? roundedAverage + remaining : null;
+          final lowest = roundedAverage != null && highest != null ? roundedAverage - (highest - roundedAverage) : null;
           final stadium = _groundTitle(data);
           return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             Text(stadium, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
             const SizedBox(height: 7),
-            _scoreProgress(average, highest, lowest),
+            _scoreProgress(roundedAverage, highest, lowest),
           ]);
         },
       ),
@@ -3096,8 +3369,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       _askAiSection(),
     ],
     ) : ListView(padding: const EdgeInsets.fromLTRB(12, 12, 12, 16), children: [
-      _teamChartCard(title: 'Runs By Phases', subtitle: 'Runs scored while batting in phases.', matches: _teamRunMatches, onMatches: (value) => setState(() => _teamRunMatches = value), metric: 'runs'),
-      const SizedBox(height: 12),
+      _teamChartCard(title: 'Runs Scored By Each Team', subtitle: 'Runs scored while batting in phases.', matches: _teamRunMatches, onMatches: (value) => setState(() => _teamRunMatches = value), metric: 'runs'),
+      const SizedBox(height: 12), 
       _teamChartCard(title: 'Wicket Taken', subtitle: 'Wicket taken while bowling in phases.', matches: _teamWicketMatches, onMatches: (value) => setState(() => _teamWicketMatches = value), metric: 'wickets'),
       const SizedBox(height: 12),
       _teamBoundaryCard(),
@@ -3129,16 +3402,51 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         if (snapshot.hasError || snapshot.data == null) return const SizedBox(height: 120, child: Center(child: Text('Team stats are not available for this match.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
         final phase = metric == 'runs' ? _teamRunPhase : _teamWicketPhase;
         final teams = _teamMetricRows(snapshot.data, metric, matches, phase);
-        return _TeamLineChart(teams: teams, metric: metric == 'runs' ? 'Runs' : 'Wickets', xAxis: 'Last $matches matches (Latest on the left)');
+        return _TeamLineChart(teams: teams, metric: metric == 'runs' ? 'Runs' : 'Wickets', xAxis: 'Most Recent Matches On The Left');
       }),
     ]),
   );
 
-  Widget _matchRangeSelector(int selected, ValueChanged<int> onChanged) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 10), decoration: BoxDecoration(border: Border.all(color: AppColors.border)),
-    child: DropdownButtonHideUnderline(child: DropdownButton<int>(value: selected, isDense: true, dropdownColor: AppColors.surface, style: const TextStyle(color: Colors.white, fontSize: 12), items: const [5, 10, 20].map((n) => DropdownMenuItem(value: n, child: Text('Last $n Matches'))).toList(), onChanged: (v) { if (v != null) onChanged(v); })),
+  Widget _matchRangeSelector(int selected, ValueChanged<int> onChanged) => PopupMenuButton<int>(
+    onSelected: onChanged,
+    tooltip: 'Number of matches',
+    position: PopupMenuPosition.under,
+    offset: const Offset(0, 8),
+    color: const Color(0xFF0A0A0A),
+    surfaceTintColor: Colors.transparent,
+    elevation: 12,
+    padding: EdgeInsets.zero,
+    menuPadding: EdgeInsets.zero,
+    constraints: const BoxConstraints.tightFor(width: 264),
+    shape: const RoundedRectangleBorder(side: BorderSide(color: Color(0xFF404040))),
+    itemBuilder: (context) => [
+      for (final count in const [5, 10, 15])
+        PopupMenuItem<int>(
+          value: count,
+          height: 52,
+          padding: EdgeInsets.zero,
+          child: Container(
+            height: 52,
+            color: selected == count ? AppColors.surface : Colors.transparent,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(children: [
+              Expanded(child: Text('Last $count matches', style: const TextStyle(color: Colors.white, fontSize: 14))),
+              if (selected == count) const Icon(Icons.check, color: Color(0xFF78C653), size: 23),
+            ]),
+          ),
+        ),
+    ],
+    child: Container(
+      height: 38,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(border: Border.all(color: const Color(0xFF404040))),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Text('Last $selected matches', style: const TextStyle(color: Colors.white, fontSize: 14)),
+        const SizedBox(width: 6),
+        const Icon(Icons.keyboard_arrow_down, size: 20, color: Colors.white),
+      ]),
+    ),
   );
-
   Widget _teamBoundaryCard() => Container(
     padding: const EdgeInsets.all(12), decoration: const BoxDecoration(color: AppColors.surface, border: Border.fromBorderSide(BorderSide(color: AppColors.border))),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -3492,7 +3800,10 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         _ChartLegend(color: Color(0xFF5B8FF9), label: 'First Innings'), SizedBox(width: 12), _ChartLegend(color: Color(0xFF34D399), label: 'Second Innings'),
       ]),
       const SizedBox(height: 8),
-      SizedBox(height: 270, child: CustomPaint(size: const Size(double.infinity, 270), painter: _RunsPhasePainter(rows))),
+      Padding(
+        padding: const EdgeInsets.only(right: 30),
+        child: SizedBox(height: 270, child: CustomPaint(size: const Size(double.infinity, 270), painter: _RunsPhasePainter(rows))),
+      ),
     ]);
   }
 
@@ -3538,7 +3849,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   }
 
   String _phaseOvers(String phase) => switch (phase.toLowerCase()) {
-    'powerplay' || 'power play' => '(0-6 Overs)', 'middle' => '(7-15 Overs)', 'death' => '(15-20 Overs)', 'total' || 'in 20 overs' => '(In 20 Overs)', _ => '',
+    'powerplay' || 'power play' => '(0-6 Overs)', 'middle' => '(7-15 Overs)', 'death' => '(16-20 Overs)', 'total' || 'in 20 overs' => '(In 20 Overs)', _ => '',
   };
 
   Widget _preMatchReportContent() => FutureBuilder<Object?>(
@@ -3576,11 +3887,11 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       padding: const EdgeInsets.all(10),
       decoration: const BoxDecoration(color: AppColors.surface, border: Border.fromBorderSide(BorderSide(color: AppColors.border))),
       child: label == null
-          ? Text(text, style: const TextStyle(fontSize: 12, height: 1.4))
+          ? GptMarkdown(text, style: const TextStyle(fontSize: 12, height: 1.4))
           : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(label, style: const TextStyle(color: AppColors.acid, fontSize: 12, fontWeight: FontWeight.w700)),
               const SizedBox(height: 5),
-              Text(text, style: const TextStyle(fontSize: 12, height: 1.4)),
+              GptMarkdown(text, style: const TextStyle(fontSize: 12, height: 1.4)),
             ]),
     );
   }
@@ -3592,18 +3903,22 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       if (snapshot.hasError) return _askAiStatus('Could not load the Playing XI.');
       final players = snapshot.data ?? const <Map<String, dynamic>>[];
       if (players.isEmpty) return _askAiStatus('The Playing XI has not been announced yet.');
-      final teamA = _playersForTeam(players, 'A');
-      final teamB = _playersForTeam(players, 'B');
-      final unassigned = players.where((player) => !_belongsToTeam(player, 'A') && !_belongsToTeam(player, 'B')).toList();
+      final announced = players.where((player) => player['_isPlaying11'] == true).toList();
+      final otherPlayers = players.where((player) => player['_isPlaying11'] != true).toList();
+      final teamA = _playersForTeam(announced, 'A');
+      final teamB = _playersForTeam(announced, 'B');
+      final teamAOther = _playersForTeam(otherPlayers, 'A');
+      final teamBOther = _playersForTeam(otherPlayers, 'B');
+      final unassigned = announced.where((player) => !_belongsToTeam(player, 'A') && !_belongsToTeam(player, 'B')).toList();
       return ListView(children: [
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Expanded(child: _squadTeamColumn('A', teamA)),
-          Container(width: 1, color: AppColors.border),
-          Expanded(child: _squadTeamColumn('B', teamB)),
-        ]),
+        IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Expanded(child: _squadTeamColumn('A', teamA, otherPlayers: teamAOther)),
+          Container(width: 1, color: _squadBorder),
+          Expanded(child: _squadTeamColumn('B', teamB, otherPlayers: teamBOther)),
+        ])),
         if (unassigned.isNotEmpty) ...[
-          const Divider(color: AppColors.border, height: 1),
-          const Padding(padding: EdgeInsets.all(8), child: Text('Other players', style: TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600))),
+          const Divider(color: _squadBorder, height: 1),
+          const Padding(padding: EdgeInsets.all(8), child: Text('Bench', style: TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600))),
           ...unassigned.map((player) => _squadPlayerRow(player)),
         ],
       ]);
@@ -3679,7 +3994,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     ],
     Expanded(child: (_squadFilter == 1 || _squadFilter == 2) && _batterSubtab == 1
       ? _comparisonResults(isBowler: _squadFilter == 2)
-      : FutureBuilder<List<Map<String, dynamic>>>(future: _squadFilter == 1 ? _topBatters : _squadFilter == 2 ? _topBowlers : _matchSquadPlayers, builder: (context, snapshot) {
+      : FutureBuilder<List<Map<String, dynamic>>>(future: _squadFilter == 1 ? _topBatters : _squadFilter == 2 ? _topBowlers : _players, builder: (context, snapshot) {
       if (snapshot.connectionState == ConnectionState.waiting) return _askAiStatus('', loading: true);
       if (snapshot.hasError) return _askAiStatus(_squadFilter == 1 ? 'Could not load top batter data.' : 'Could not load players.');
       final players = snapshot.data ?? [];
@@ -3698,11 +4013,11 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       return ListView.builder(itemCount: filtered.length + 1, itemBuilder: (context, index) {
         if (index == filtered.length) return _askAiSection();
         final player = filtered[index];
-        final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? 'Player').toString();
+        final name = _playerName(player);
         final role = _squadRoleLabel(player);
         final team = (player['_teamLabel'] ?? player['teamName'] ?? player['team_name'] ?? '').toString();
         final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
-        return Container(decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: ListTile(
+        return Container(decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _squadBorder))), child: ListTile(
           dense: true, leading: CircleAvatar(radius: 18, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 20, color: AppColors.muted) : null),
           title: Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
           subtitle: Text([if (team.isNotEmpty) team, role.isEmpty ? 'Player' : role].join(' • '), style: const TextStyle(fontSize: 11, color: AppColors.muted)),
@@ -3716,14 +4031,14 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final teamB = _playersForTeam(players, 'B');
     final unassigned = players.where((player) => !_belongsToTeam(player, 'A') && !_belongsToTeam(player, 'B')).toList();
     return ListView(children: [
-      Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Expanded(child: _squadTeamColumn('A', teamA)),
-        Container(width: 1, color: AppColors.border),
+        Container(width: 1, color: _squadBorder),
         Expanded(child: _squadTeamColumn('B', teamB)),
-      ]),
+      ])),
       if (unassigned.isNotEmpty) ...[
-        const Divider(color: AppColors.border, height: 1),
-        Padding(padding: const EdgeInsets.all(8), child: Text('Other players', style: const TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600))),
+        const Divider(color: _squadBorder, height: 1),
+        Padding(padding: const EdgeInsets.all(8), child: Text('Bench', style: const TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600))),
         ...unassigned.map((player) => _squadPlayerRow(player)),
       ],
       _askAiSection(),
@@ -3763,7 +4078,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     });
   }
 
-  Widget _squadTeamColumn(String side, List<Map<String, dynamic>> players) {
+  Widget _squadTeamColumn(String side, List<Map<String, dynamic>> players, {List<Map<String, dynamic>> otherPlayers = const []}) {
     final name = widget.match.teamName(side, scorecard: widget.scorecard);
     final logo = widget.match.teamFlag(side, scorecard: widget.scorecard);
     final rightAlign = side == 'B';
@@ -3782,14 +4097,22 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           Expanded(child: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700))),
         ]),
       ),
-      const Divider(height: 1, color: AppColors.border),
+      const Divider(height: 1, color: _squadBorder),
       if (players.isEmpty)
         const Padding(padding: EdgeInsets.all(12), child: Center(child: Text('No players listed', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 11))))
       else
         for (var index = 0; index < players.length; index++) ...[
-          if (index > 0) const Divider(height: 1, color: AppColors.border),
+          if (index > 0) const Divider(height: 1, color: _squadBorder),
           _squadPlayerRow(players[index], alignRight: rightAlign),
         ],
+      if (otherPlayers.isNotEmpty) ...[
+        const Divider(height: 1, color: _squadBorder),
+        const Padding(padding: EdgeInsets.all(8), child: Align(alignment: Alignment.centerLeft, child: Text('Bench', style: TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)))),
+        for (var index = 0; index < otherPlayers.length; index++) ...[
+          if (index > 0) const Divider(height: 1, color: _squadBorder),
+          _squadPlayerRow(otherPlayers[index], alignRight: rightAlign),
+        ],
+      ],
     ]);
   }
 
@@ -3862,7 +4185,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final text = roles is List ? roles.join(' ').toLowerCase() : '${roles ?? ''}'.toLowerCase();
     return text.contains('bowl') || text.contains('allround') || text.contains('all-round');
   }
-  String _playerName(Map<String, dynamic> player) => (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? player['title'] ?? player['short_name'] ?? 'Player').toString();
+  String _playerName(Map<String, dynamic> player) => (player['title'] ?? player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? player['short_name'] ?? 'Player').toString();
 
   Widget _batterModeChip(String label, int value) => InkWell(
     onTap: () => setState(() {
@@ -3875,7 +4198,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         }
       }
     }),
-    child: Container(height: 32, alignment: Alignment.center, decoration: BoxDecoration(color: _batterSubtab == value ? const Color(0xFF292929) : AppColors.surface, border: Border.all(color: _batterSubtab == value ? AppColors.border : AppColors.border)), child: Text(label, style: TextStyle(fontSize: 11, color: _batterSubtab == value ? Colors.white : AppColors.muted))),
+    child: Container(height: 32, alignment: Alignment.center, decoration: BoxDecoration(color: _batterSubtab == value ? const Color(0xFF292929) : AppColors.surface, border: Border.all(color: _squadBorder)), child: Text(label, style: TextStyle(fontSize: 11, color: _batterSubtab == value ? Colors.white : AppColors.muted))),
   );
 
   Widget _comparisonResults({bool isBowler = false}) => FutureBuilder<Object?>(future: isBowler ? _bowlerComparison : _batterComparison, builder: (context, snapshot) {
@@ -3887,7 +4210,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return ListView(
       children: [
         ...rows.map((row) => Container(
-        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))),
+        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _squadBorder))),
         child: ListTile(
           dense: true,
           title: Text(row.$1, style: const TextStyle(fontSize: 12)),
@@ -3934,9 +4257,10 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Widget _batterDropdown<T>({required T value, required List<DropdownMenuItem<T>> items, required ValueChanged<T?> onChanged}) => DropdownButtonFormField<T>(
     initialValue: value,
     isExpanded: true,
+    menuMaxHeight: 240,
     dropdownColor: AppColors.surface,
     style: const TextStyle(color: Colors.white, fontSize: 11),
-    decoration: const InputDecoration(filled: true, fillColor: AppColors.surface, contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 5), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.border), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero)),
+    decoration: const InputDecoration(filled: true, fillColor: AppColors.surface, contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 5), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: _squadBorder), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero)),
     items: items,
     onChanged: onChanged,
   );
@@ -3946,7 +4270,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
     final probability = player['probability'] ?? player['percentage'] ?? player['score'] ?? player['value'] ?? player['probabilityPercentage'];
     final display = _squadPercentage(probability);
-    return Container(decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))), child: ListTile(
+    return Container(decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _squadBorder))), child: ListTile(
       dense: true,
       leading: CircleAvatar(radius: 18, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 20, color: AppColors.muted) : null),
       title: Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -3959,9 +4283,9 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     if (index == 1) _loadTopBatters();
     if (index == 2) _loadTopBowlers();
   }), child: Container(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-    decoration: BoxDecoration(color: _squadFilter == index ? AppColors.acid : AppColors.surface, border: Border.all(color: _squadFilter == index ? AppColors.acid : AppColors.border)),
-    child: Text(label, style: TextStyle(color: _squadFilter == index ? Colors.black : AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)),
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 1),
+    decoration: BoxDecoration(color: _squadFilter == index ? AppColors.acid : AppColors.surface, border: Border.all(color: _squadFilter == index ? AppColors.acid : _squadBorder)),
+    child: Text(label, style: TextStyle(color: _squadFilter == index ? Colors.black : AppColors.muted, fontSize: 14, fontWeight: FontWeight.w600)),
   ));
 
   Widget _detailTeam(MatchData match, String side, {bool rightAlign = false, Map<String, dynamic>? scorecard}) {
@@ -4103,7 +4427,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   ])));
 
   Widget _askAiSection() => Container(
-        margin: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+        margin: const EdgeInsets.fromLTRB(0, 8, 0, 12),
         padding: const EdgeInsets.fromLTRB(10, 12, 10, 10),
         decoration: BoxDecoration(color: const Color(0xFF080808), border: Border.all(color: AppColors.border)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -4389,15 +4713,18 @@ class _TeamLineChart extends StatelessWidget {
   Widget build(BuildContext context) {
     if (teams.isEmpty || teams.every((team) => team.values.isEmpty)) return const SizedBox(height: 220, child: Center(child: Text('No team trend data available.', style: TextStyle(color: AppColors.muted, fontSize: 11))));
     final colors = [const Color(0xFF5B8FF9), const Color(0xFF34D399)];
-    return Column(children: [
+    return Container(
+      color: const Color(0xFF282828),
+      padding: const EdgeInsets.fromLTRB(8, 36, 8, 20),
+      child: Column(children: [
       Row(mainAxisAlignment: MainAxisAlignment.center, children: [for (var i = 0; i < teams.length; i++) Padding(padding: const EdgeInsets.symmetric(horizontal: 5), child: _ChartLegend(color: colors[i % colors.length], label: teams[i].name))]),
-      const SizedBox(height: 8),
+      const SizedBox(height: 30),
       Row(children: [
         RotatedBox(quarterTurns: 3, child: Text(metric, style: const TextStyle(fontSize: 9, color: AppColors.muted))),
         Expanded(child: SizedBox(height: 255, child: CustomPaint(painter: _TeamLinePainter(teams, metric, colors)))),
       ]),
       Text(xAxis, style: const TextStyle(fontSize: 10, color: AppColors.muted)),
-    ]);
+    ]));
   }
 }
 
@@ -4408,7 +4735,7 @@ class _TeamLinePainter extends CustomPainter {
   final List<Color> colors;
   @override
   void paint(Canvas canvas, Size size) {
-    const left = 30.0, right = 6.0, top = 10.0, bottom = 28.0;
+    const left = 30.0, right = 8.0, top = 20.0, bottom = 32.0;
     final values = teams.expand((e) => e.values).toList();
     if (values.isEmpty) return;
     final max = (values.fold<num>(0, (a, b) => a > b ? a : b) * 1.15).clamp(1, double.infinity).toDouble();
@@ -4421,25 +4748,44 @@ class _TeamLinePainter extends CustomPainter {
       tp.paint(canvas, Offset(left - tp.width - 4, y - tp.height / 2));
     }
     final count = teams.fold<int>(0, (n, team) => n > team.values.length ? n : team.values.length);
+    const inset = 22.0;
+    double pointX(int i) => left + (count <= 1 ? w / 2 : inset + (w - inset * 2) * i / (count - 1));
+    canvas.drawLine(Offset(left, top), Offset(left, top + h), grid);
     for (var i = 0; i < count; i++) {
-      final x = left + (count <= 1 ? w / 2 : w * i / (count - 1));
+      final x = pointX(i);
       final label = TextPainter(text: TextSpan(text: 'M${i + 1}', style: const TextStyle(color: AppColors.muted, fontSize: 8)), textDirection: TextDirection.ltr)..layout();
       label.paint(canvas, Offset(x - label.width / 2, size.height - 14));
     }
     for (var ti = 0; ti < teams.length; ti++) {
       final points = <Offset>[];
       for (var i = 0; i < teams[ti].values.length; i++) {
-        final x = left + (count <= 1 ? w / 2 : w * i / (count - 1));
+        final x = pointX(i);
         points.add(Offset(x, top + h * (1 - teams[ti].values[i].toDouble() / max)));
       }
-      final path = Path();
-      for (var i = 0; i < points.length; i++) { if (i == 0) {
-        path.moveTo(points[i].dx, points[i].dy);
-      } else {
-        path.lineTo(points[i].dx, points[i].dy);
-      } }
+      if (points.isEmpty) continue;
+      final path = Path()..moveTo(points.first.dx, points.first.dy);
+      for (var i = 1; i < points.length; i++) {
+        final midpoint = (points[i - 1].dx + points[i].dx) / 2;
+        path.cubicTo(midpoint, points[i - 1].dy, midpoint, points[i].dy, points[i].dx, points[i].dy);
+      }
       canvas.drawPath(path, Paint()..color = colors[ti % colors.length]..style = PaintingStyle.stroke..strokeWidth = 2.2);
-      for (final p in points) { canvas.drawCircle(p, 2.2, Paint()..color = colors[ti % colors.length]); }
+      for (var i = 0; i < points.length; i++) {
+        final point = points[i];
+        canvas.drawCircle(point, 2.2, Paint()..color = colors[ti % colors.length]);
+        final value = teams[ti].values[i];
+        final others = [for (var other = 0; other < teams.length; other++)
+          if (other != ti && i < teams[other].values.length) teams[other].values[i]];
+        final above = others.isEmpty || value > others.first || (value == others.first && ti == 0);
+        final label = TextPainter(
+          text: TextSpan(text: value.toStringAsFixed(value % 1 == 0 ? 0 : 2),
+            style: const TextStyle(color: Colors.white, fontSize: 9)),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        final x = (point.dx - label.width / 2).clamp(left + 5, size.width - right - label.width - 3).toDouble();
+        final y = (point.dy + (above ? -label.height - 6 : 6))
+            .clamp(0, top + h - label.height - 4).toDouble();
+        label.paint(canvas, Offset(x, y));
+      }
     }
   }
   @override
@@ -4533,10 +4879,10 @@ class _RunsPhasePainter extends CustomPainter {
     _ => name,
   };
   String _overs(String name) => switch (name.toLowerCase()) {
-    'powerplay' || 'power play' => '(0-6 Overs)',
-    'middle' => '(7-15 Overs)',
-    'death' => '(15-20 Overs)',
-    'total' || 'in 20 overs' => '(In 20 Overs)',
+    'powerplay' || 'power play' => '(0-6 Ovs)',
+    'middle' => '(7-15 Ovs)',
+    'death' => '(16-20 Ovs)',
+    'total' || 'in 20 overs' => '(In 20 Ovs)',
     _ => '',
   };
 
@@ -4583,7 +4929,15 @@ class _RunsPhasePainter extends CustomPainter {
         canvas.drawCircle(point, 2.5, Paint()..color = color);
         final raw = isFirst ? rows[i].firstInnings : rows[i].secondInnings;
         final label = TextPainter(text: TextSpan(text: _valueLabel(raw), style: const TextStyle(color: Colors.white, fontSize: 8)), textDirection: TextDirection.ltr)..layout();
-        final offset = Offset(point.dx - label.width / 2, point.dy + (isFirst ? -label.height - 5 : 5));
+        final other = isFirst ? rows[i].secondInnings : rows[i].firstInnings;
+        final above = raw > other || (raw == other && isFirst);
+        final labelX = (point.dx - label.width / 2)
+            .clamp(left + 6, size.width - right - label.width - 6)
+            .toDouble();
+        final labelY = (point.dy + (above ? -label.height - 5 : 5))
+            .clamp(top, top + height - label.height - 4)
+            .toDouble();
+        final offset = Offset(labelX, labelY);
         label.paint(canvas, offset);
       }
     }
@@ -4618,7 +4972,7 @@ class _EconomyPhasePainter extends CustomPainter {
   String _overs(String name) => switch (name.toLowerCase()) {
     'powerplay' || 'power play' => '(0-6 Overs)',
     'middle' => '(7-15 Overs)',
-    'death' => '(15-20 Overs)',
+    'death' => '(16-20 Overs)',
     _ => '',
   };
 
