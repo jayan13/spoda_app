@@ -1128,7 +1128,7 @@ class _HomePageState extends State<HomePage> {
         onTap: () => _openMatchDetails(match, scorecard),
         child: Container(
           margin: const EdgeInsets.only(bottom: 10),
-          decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)),
+          decoration: BoxDecoration(color: _isLive(match, scorecard) || _isDone(match, scorecard) ? AppColors.surface : const Color(0xFF080808), border: Border.all(color: AppColors.border)),
           child: Column(children: [
             Padding(padding: const EdgeInsets.fromLTRB(12, 12, 12, 10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
@@ -1161,7 +1161,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ]),
               ),
-            Container(color: const Color(0xFF111111), padding: const EdgeInsets.all(12), child: Row(children: [
+            Container(color: _isLive(match, scorecard) || _isDone(match, scorecard) ? const Color(0xFF111111) : const Color(0xFF151515), padding: const EdgeInsets.all(12), child: Row(children: [
               Expanded(child: Text(_isLive(match, scorecard) ? 'Live match updates and score' : _isDone(match, scorecard) ? 'Match result and scorecard available' : 'Match prediction and insights available', style: const TextStyle(fontSize: 12, color: Colors.white70))),
               TextButton(onPressed: () => _openMatchDetails(match, scorecard), style: TextButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: Colors.black, shape: const RoundedRectangleBorder()), child: Text(_isLive(match, scorecard) ? 'Live Match' : _isDone(match, scorecard) ? 'Scorecard ›' : 'Prediction ›', style: const TextStyle(fontWeight: FontWeight.bold))),
             ])),
@@ -2593,6 +2593,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       return Scaffold(
         appBar: AppBar(
           backgroundColor: const Color(0xFF151515),
+          surfaceTintColor: Colors.transparent,
+          scrolledUnderElevation: 0,
           shape: const Border(bottom: BorderSide(color: Color(0xFF303030))),          
           elevation: 0,
           titleSpacing: 0,
@@ -2756,8 +2758,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final event = (ball['event'] ?? '').toString().toLowerCase();
     if (event == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true) return AppColors.red;
     final run = int.tryParse((ball['run'] ?? ball['score'] ?? '0').toString()) ?? 0;
-    if (ball['six'] == true || run == 6) return const Color(0xFF34D399);
-    if (ball['four'] == true || run == 4) return const Color(0xFF5B8FF9);
+    if (ball['six'] == true || run == 6) return const Color(0xFF16A765);
+    if (ball['four'] == true || run == 4) return const Color(0xFF008AAE);
     return const Color(0xFF444444);
   }
 
@@ -2780,7 +2782,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     );
   }
 
-  Widget _commentaryTeamScoreHeading(Map<String, dynamic>? response, int index, {required bool selected, required VoidCallback onTap}) {
+  String _commentaryTeamShortName(Map<String, dynamic>? response, int index) {
     final inning = _commentaryInning(response);
     final battingTeamId = inning?['batting_team_id']?.toString();
     final mappedSide = _scorecardSideForTeamId(battingTeamId);
@@ -2794,6 +2796,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         ? normalizedFeedTeam.split(RegExp(r'\s+')).first
         : scorecardTeam.split(RegExp(r'\s+')).first;
     team = team.replaceFirst(RegExp(r'-W$', caseSensitive: false), '');
+    return team;
+  }
+
+  Widget _commentaryTeamScoreHeading(Map<String, dynamic>? response, int index, {required bool selected, required VoidCallback onTap}) {
+    final inning = _commentaryInning(response);
+    final suffix = _scorecardSideForTeamId(inning?['batting_team_id']?.toString()) ?? (index == 0 ? 'A' : 'B');
+    final team = _commentaryTeamShortName(response, index);
     final inningScore = (inning?['scores'] ?? '').toString().trim();
     final scorecardScore = widget.match.teamScore(suffix, scorecard: widget.scorecard);
     // The commentary innings score belongs to the displayed batting team.
@@ -2929,13 +2938,22 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final bowlerName = directName.isNotEmpty ? directName : _commentaryPlayerName(response?['players'], bowlerId) ?? 'Bowler';
     final expanded = _expandedOvers.contains(rowKey);
     return InkWell(onTap: () => setState(() => expanded ? _expandedOvers.remove(rowKey) : _expandedOvers.add(rowKey)), child: Container(height: rowHeight, padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))), child: expanded ? Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-      Text('$runs/$wickets ($runs runs, $wickets ${wickets == 1 ? 'wicket' : 'wickets'})', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)),
+      _overScoreText(runs, wickets),
       if (expanded) Wrap(spacing: 3, children: entries.map((ball) { final run = (ball['run'] ?? ball['score'] ?? 0).toString(); final wicket = (ball['event'] ?? '').toString() == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true; final label = wicket ? 'W' : run == '0' ? '.' : run; return Container(width: 16, height: 16, alignment: Alignment.center, decoration: BoxDecoration(color: _ballCircleColor(ball), shape: BoxShape.circle), child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700))); }).toList()),
-      if (expanded) Text('Bowler: $bowlerName', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, color: AppColors.muted)),
+      if (expanded) Text.rich(TextSpan(style: const TextStyle(color: Colors.white), children: [const TextSpan(text: 'Bowler: ', style: TextStyle(fontSize: 16)), TextSpan(text: bowlerName, style: const TextStyle(fontSize: 12))]), maxLines: 1, overflow: TextOverflow.ellipsis),
       if (expanded) Text('CRR: ${crr.toStringAsFixed(2)}', maxLines: 1, style: const TextStyle(fontSize: 10, color: AppColors.acid)),
       
-    ]) : Align(alignment: Alignment.centerLeft, child: Text('$runs/$wickets ($runs runs, $wickets ${wickets == 1 ? 'wicket' : 'wickets'})', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700)))));
+    ]) : Align(alignment: Alignment.centerLeft, child: _overScoreText(runs, wickets))));
   }
+
+  Widget _overScoreText(int runs, int wickets) => Text.rich(
+    TextSpan(children: [
+      TextSpan(text: '$runs/$wickets', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      TextSpan(text: ' ($runs runs, $wickets ${wickets == 1 ? 'wicket' : 'wickets'})', style: const TextStyle(fontSize: 12)),
+    ]),
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+  );
   Widget _commentaryContent() => FutureBuilder<List<Map<String, dynamic>?>>(
     future: Future.wait(_commentaryInningsData),
     builder: (context, snapshot) {
@@ -3073,13 +3091,19 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       sum + (int.tryParse((delivery['run'] ?? delivery['score'] ?? 0).toString()) ?? 0)).toString();
     final overNumber = rawOver?.toString().trim();
     final score = (row['score'] ?? '').toString().trim();
+    final team = _commentaryTeamShortName(response, _commentaryInnings);
+    final scoreLabel = score.isEmpty || team.isEmpty || score.toLowerCase().startsWith('${team.toLowerCase()} ') ? score : '$team $score';
+    final bowler = row['bowler'] is Map ? row['bowler'] as Map : null;
+    final bowlerId = (row['bowler_id'] ?? row['bowlerId'] ?? bowler?['pid'] ?? bowler?['player_id'] ?? overDeliveries.map((delivery) => delivery['bowler_id'] ?? delivery['bowlerId'] ?? delivery['bowlerid']).firstWhere((id) => id != null && id.toString().trim().isNotEmpty, orElse: () => null) ?? '').toString();
+    final directBowlerName = (row['bowler_name'] ?? row['bowlerName'] ?? bowler?['name'] ?? bowler?['title'] ?? (row['bowler'] is String ? row['bowler'] : null) ?? overDeliveries.map((delivery) => delivery['bowler_name'] ?? delivery['bowlerName']).firstWhere((name) => name != null && name.toString().trim().isNotEmpty, orElse: () => null))?.toString().trim();
+    final bowlerName = directBowlerName?.isNotEmpty == true ? directBowlerName : bowlerId.isEmpty ? null : _commentaryPlayerName(response?['players'], bowlerId);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      decoration: const BoxDecoration(color: Color(0xFF111111), border: Border(bottom: BorderSide(color: AppColors.border))),
+      decoration: const BoxDecoration(color: Color(0xFF252525), border: Border(bottom: BorderSide(color: AppColors.border))),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (score.isNotEmpty) Text(score, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+          if (scoreLabel.isNotEmpty) Text(scoreLabel, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
           if (batters.isNotEmpty) ...[
             if (score.isNotEmpty) const SizedBox(height: 7),
             for (final batter in batters) Padding(
@@ -3097,10 +3121,12 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             final event = (delivery['event'] ?? '').toString().toLowerCase();
             final isWicket = event == 'wicket' || delivery['wicket'] == true || delivery['noball_dismissal'] == true;
             final run = (delivery['run'] ?? delivery['score'] ?? 0).toString();
-            final isBoundary = delivery['four'] == true || delivery['six'] == true;
-            final color = isWicket ? AppColors.red : isBoundary ? AppColors.acid : run == '0' ? const Color(0xFF444444) : const Color(0xFF1685A2);
-            return Container(width: 20, height: 20, alignment: Alignment.center, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Text(isWicket ? 'W' : run, style: TextStyle(color: isBoundary ? Colors.black : Colors.white, fontSize: 9, fontWeight: FontWeight.w700)));
+            return Container(width: 20, height: 20, alignment: Alignment.center, decoration: BoxDecoration(color: _ballCircleColor(delivery), shape: BoxShape.circle), child: Text(isWicket ? 'W' : run == '0' ? '.' : run, style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700)));
             }).toList())),
+          ],
+          if (bowlerName != null && bowlerName.isNotEmpty) ...[
+            const SizedBox(height: 7),
+            Text('Bowler: $bowlerName', textAlign: TextAlign.right, style: const TextStyle(color: AppColors.muted, fontSize: 11)),
           ],
         ])),
       ]),
@@ -3912,13 +3938,26 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final unassigned = announced.where((player) => !_belongsToTeam(player, 'A') && !_belongsToTeam(player, 'B')).toList();
       return ListView(children: [
         IntrinsicHeight(child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Expanded(child: _squadTeamColumn('A', teamA, otherPlayers: teamAOther)),
+          Expanded(child: _squadTeamColumn('A', teamA)),
           Container(width: 1, color: _squadBorder),
-          Expanded(child: _squadTeamColumn('B', teamB, otherPlayers: teamBOther)),
+          Expanded(child: _squadTeamColumn('B', teamB)),
         ])),
+        if (teamAOther.isNotEmpty || teamBOther.isNotEmpty) ...[
+          const Divider(color: _squadBorder, height: 1),
+          const Padding(padding: EdgeInsets.all(8), child: Center(child: Text('Bench', style: TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)))),
+          for (var i = 0; i < math.max(teamAOther.length, teamBOther.length); i++)
+            IntrinsicHeight(child: Container(
+              decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _squadBorder))),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Expanded(child: i < teamAOther.length ? _squadPlayerRow(teamAOther[i]) : const SizedBox.shrink()),
+                Container(width: 1, color: _squadBorder),
+                Expanded(child: i < teamBOther.length ? _squadPlayerRow(teamBOther[i], alignRight: true) : const SizedBox.shrink()),
+              ]),
+            )),
+        ],
         if (unassigned.isNotEmpty) ...[
           const Divider(color: _squadBorder, height: 1),
-          const Padding(padding: EdgeInsets.all(8), child: Text('Bench', style: TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600))),
+          const Padding(padding: EdgeInsets.all(8), child: Text('Other players', style: TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600))),
           ...unassigned.map((player) => _squadPlayerRow(player)),
         ],
       ]);
@@ -3927,14 +3966,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
 
   Widget _squadsContent() => Column(children: [
     const SizedBox(height: 12),
-    SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
+    SingleChildScrollView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), child: Row(children: [
       _squadChip('Whole Squad', 0), const SizedBox(width: 8), _squadChip('Top Batter', 1), const SizedBox(width: 8), _squadChip('Top Bowler', 2),
     ])),
     const SizedBox(height: 12),
     if (_squadFilter == 1 || _squadFilter == 2) ...[
       Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Row(children: [
         Expanded(child: _batterModeChip(_squadFilter == 1 ? 'Top Batter' : 'Top Bowler', 0)),
-        const SizedBox(width: 8),
         Expanded(child: _batterModeChip(_squadFilter == 1 ? 'Batter Vs Bowler' : 'Bowler Vs Batter', 1)),
       ])),
       const SizedBox(height: 10),
@@ -4078,7 +4116,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     });
   }
 
-  Widget _squadTeamColumn(String side, List<Map<String, dynamic>> players, {List<Map<String, dynamic>> otherPlayers = const []}) {
+  Widget _squadTeamColumn(String side, List<Map<String, dynamic>> players) {
     final name = widget.match.teamName(side, scorecard: widget.scorecard);
     final logo = widget.match.teamFlag(side, scorecard: widget.scorecard);
     final rightAlign = side == 'B';
@@ -4105,14 +4143,6 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           if (index > 0) const Divider(height: 1, color: _squadBorder),
           _squadPlayerRow(players[index], alignRight: rightAlign),
         ],
-      if (otherPlayers.isNotEmpty) ...[
-        const Divider(height: 1, color: _squadBorder),
-        const Padding(padding: EdgeInsets.all(8), child: Align(alignment: Alignment.centerLeft, child: Text('Bench', style: TextStyle(color: AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)))),
-        for (var index = 0; index < otherPlayers.length; index++) ...[
-          if (index > 0) const Divider(height: 1, color: _squadBorder),
-          _squadPlayerRow(otherPlayers[index], alignRight: rightAlign),
-        ],
-      ],
     ]);
   }
 
@@ -4198,7 +4228,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         }
       }
     }),
-    child: Container(height: 32, alignment: Alignment.center, decoration: BoxDecoration(color: _batterSubtab == value ? const Color(0xFF292929) : AppColors.surface, border: Border.all(color: _squadBorder)), child: Text(label, style: TextStyle(fontSize: 11, color: _batterSubtab == value ? Colors.white : AppColors.muted))),
+    child: Container(height: 32, alignment: Alignment.center, decoration: BoxDecoration(color: _batterSubtab == value ? const Color(0xFF292929) : const Color(0xFF080808), border: Border.all(color: _squadBorder)), child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _batterSubtab == value ? AppColors.acid : AppColors.muted))),
   );
 
   Widget _comparisonResults({bool isBowler = false}) => FutureBuilder<Object?>(future: isBowler ? _bowlerComparison : _batterComparison, builder: (context, snapshot) {
@@ -4254,16 +4284,19 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return rows;
   }
 
-  Widget _batterDropdown<T>({required T value, required List<DropdownMenuItem<T>> items, required ValueChanged<T?> onChanged}) => DropdownButtonFormField<T>(
+  Widget _batterDropdown<T>({required T value, required List<DropdownMenuItem<T>> items, required ValueChanged<T?> onChanged}) => SizedBox(height: 32, child: DropdownButtonFormField<T>(
     initialValue: value,
     isExpanded: true,
     menuMaxHeight: 240,
-    dropdownColor: AppColors.surface,
+    dropdownColor: const Color(0xFF101010),
+    borderRadius: BorderRadius.zero,
+    icon: const Icon(Icons.keyboard_arrow_down, size: 18, color: Colors.white),
     style: const TextStyle(color: Colors.white, fontSize: 11),
-    decoration: const InputDecoration(filled: true, fillColor: AppColors.surface, contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 5), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: _squadBorder), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero)),
-    items: items,
+    decoration: const InputDecoration(isDense: true, filled: true, fillColor: Color(0xFF101010), contentPadding: EdgeInsets.symmetric(horizontal: 9, vertical: 7), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: _squadBorder), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: _squadBorder), borderRadius: BorderRadius.zero)),
+    selectedItemBuilder: (context) => items.map((item) => Align(alignment: Alignment.centerLeft, child: item.child)).toList(),
+    items: items.map((item) => DropdownMenuItem<T>(value: item.value, enabled: item.enabled, child: Row(children: [Expanded(child: item.child), if (item.value == value) const Icon(Icons.check, size: 16, color: Color(0xFF75C45A))]))).toList(),
     onChanged: onChanged,
-  );
+  ));
 
   Widget _topBatterRow(Map<String, dynamic> player) {
     final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? player['batsmanName'] ?? 'Player').toString();
@@ -4283,9 +4316,9 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     if (index == 1) _loadTopBatters();
     if (index == 2) _loadTopBowlers();
   }), child: Container(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 1),
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
     decoration: BoxDecoration(color: _squadFilter == index ? AppColors.acid : AppColors.surface, border: Border.all(color: _squadFilter == index ? AppColors.acid : _squadBorder)),
-    child: Text(label, style: TextStyle(color: _squadFilter == index ? Colors.black : AppColors.muted, fontSize: 14, fontWeight: FontWeight.w600)),
+    child: Text(label, style: TextStyle(color: _squadFilter == index ? Colors.black : AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)),
   ));
 
   Widget _detailTeam(MatchData match, String side, {bool rightAlign = false, Map<String, dynamic>? scorecard}) {
