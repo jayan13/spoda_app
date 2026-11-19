@@ -843,7 +843,20 @@ class _HomePageState extends State<HomePage> {
 
   Future<List<Map<String, dynamic>?>> _scorecardsFor(List<MatchData> matches) {
     final key = jsonEncode(matches.map((match) => match.matchId).toList());
-    return _scorecardBatches.putIfAbsent(key, () => Future.wait(matches.map(_loadScorecard)));
+    return _scorecardBatches.putIfAbsent(key, () async {
+      final results = List<Map<String, dynamic>?>.filled(matches.length, null);
+      Future<void> loadGroup(bool today) async {
+        await Future.wait(List.generate(matches.length, (index) async {
+          final match = matches[index];
+          if ((match.group == 'today' || match.group == 'live') != today) return;
+          results[index] = await _loadScorecard(match);
+          if (mounted) setState(() {});
+        }));
+      }
+      await loadGroup(true);
+      await loadGroup(false);
+      return results;
+    });
   }
   @override
   void initState() {
@@ -915,13 +928,13 @@ class _HomePageState extends State<HomePage> {
 
   Future<Map<String, dynamic>?> _loadScorecard(MatchData match) => _scorecardRequests.putIfAbsent(match.matchId, () async {
     if (match.matchId.isEmpty) return null;
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     try {
-      final req = await client.getUrl(Uri.parse('https://api.spoda.ai/match-scorecard?matchId=${Uri.encodeQueryComponent(match.matchId)}')).timeout(const Duration(seconds: 8));
+      final req = await client.getUrl(Uri.parse('https://api.spoda.ai/match-scorecard?matchId=${Uri.encodeQueryComponent(match.matchId)}')).timeout(const Duration(seconds: 20));
       req.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
-      final response = await req.close().timeout(const Duration(seconds: 8));
+      final response = await req.close().timeout(const Duration(seconds: 20));
       if (response.statusCode < 200 || response.statusCode >= 300) return _scorecardData[match.matchId];
-      final payload = jsonDecode(await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 8)));
+      final payload = jsonDecode(await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 20)));
       if (payload is Map) {
         final scorecard = Map<String, dynamic>.from(payload);
         _scorecardData[match.matchId] = scorecard;
@@ -952,10 +965,10 @@ class _HomePageState extends State<HomePage> {
   Future<List<MatchData>> _loadMatches() async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
     try {
-      final req = await client.getUrl(Uri.parse('https://api.spoda.ai/match-overview/matches'));
+      final req = await client.getUrl(Uri.parse('https://api.spoda.ai/match-overview/matches')).timeout(const Duration(seconds: 15));
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      final response = await req.close();
-      final text = await response.transform(utf8.decoder).join();
+      final response = await req.close().timeout(const Duration(seconds: 15));
+      final text = await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 15));
       debugPrint('[matches-api] HTTP ${response.statusCode}');
       debugPrint('[matches-api] Raw response: $text');
       if (response.statusCode < 200 || response.statusCode >= 300) throw HttpException('Server returned ${response.statusCode}');
@@ -1043,7 +1056,9 @@ class _HomePageState extends State<HomePage> {
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           if (matchSnapshot.hasData)
-            _liveSlider(_ordered(matchSnapshot.data ?? [])),
+            _liveSlider(_ordered(matchSnapshot.data ?? []))
+          else if (matchSnapshot.hasError)
+            TextButton(onPressed: () => setState(() { _matches = _loadMatches(); }), child: const Text('Could not load matches. Tap to retry.')),
           const SizedBox(height: 24), _sectionHeader('Upcoming', () => setState(() { _tab = 1; _matchStatus = 1; })),
           if (matchSnapshot.connectionState == ConnectionState.waiting) const SizedBox(height: 100, child: Center(child: CircularProgressIndicator(color: AppColors.acid)))
           else _upcomingMatchCards(_ordered(matchSnapshot.data ?? [])),
@@ -1080,7 +1095,7 @@ class _HomePageState extends State<HomePage> {
   );
   }
   Widget _liveSlider(List<MatchData> matches) {
-    final candidates = matches.where((match) => match.group == 'today' || match.group == 'live').toList();
+    final candidates = matches;
     if (candidates.isEmpty) return const SizedBox.shrink();
     return FutureBuilder<List<Map<String, dynamic>?>>(
       future: _scorecardsFor(candidates),
@@ -1330,13 +1345,7 @@ class _HomePageState extends State<HomePage> {
                   return _empty('Could not load matches. Check your connection and try again.', retry: true);
                 }
                 final allMatches = snapshot.data ?? const <MatchData>[];
-                // The overview endpoint groups active matches under
-                // todaysMatches. Only those rows need scorecard lookups when
-                // the Live tab is selected; querying every historical and
-                // future match at once can cause the live checks to time out.
-                final matchesToCheck = _matchStatus == 0
-                    ? allMatches.where((match) => match.group == 'today' || match.group == 'live').toList()
-                    : allMatches;
+                final matchesToCheck = allMatches;
                 return FutureBuilder<List<Map<String, dynamic>?>>(
                   future: _scorecardsFor(matchesToCheck),
                   builder: (context, scorecardSnapshot) {
@@ -1841,6 +1850,9 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   final _question = TextEditingController();
   late Future<bool> _isLoggedIn = _checkLogin();
   final List<({String question, String answer})> _aiMessages = [];
+  static const _chatStorage = FlutterSecureStorage();
+  Future<void>? _chatRestore;
+  String? _chatStorageKey;
   final Set<int> _expandedAiAnswers = {};
   final GlobalKey _latestAiContentKey = GlobalKey();
   String? _pendingAiQuestion;
@@ -1924,7 +1936,51 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     _detailScorecardData = widget.scorecard;
     _matchScorecard = _loadDetailScorecard();
     _commentaryInningsData = [_loadCommentaryInnings(1), _loadCommentaryInnings(2)];
+    _chatRestore = _restoreChat();
     _startCommentaryRefreshTimer();
+  }
+
+  Future<void> _restoreChat() async {
+    try {
+      final auth = AuthService.instance;
+      if ((await auth.accessToken())?.isNotEmpty != true) return;
+      final profile = auth.profile ?? await auth.restoreProfile();
+      final user = (profile?['id'] ?? profile?['email'] ?? '').toString().trim();
+      final matchId = widget.match.matchId.trim();
+      if (user.isEmpty || matchId.isEmpty) return;
+      final key = 'ask_ai_${Uri.encodeComponent(user)}_${Uri.encodeComponent(matchId)}';
+      if (_chatStorageKey == key) return;
+      final raw = await _chatStorage.read(key: key);
+      final decoded = raw == null ? null : jsonDecode(raw);
+      if (!mounted) return;
+      setState(() {
+        _chatStorageKey = key;
+        _aiMessages.clear();
+        _conversationId = '';
+        if (decoded is Map) {
+          _conversationId = decoded['conversationId']?.toString() ?? '';
+          final messages = decoded['messages'];
+          if (messages is List) {
+            for (final message in messages.whereType<Map>()) {
+              if (message['question'] is String && message['answer'] is String) {
+                _aiMessages.add((question: message['question'] as String, answer: message['answer'] as String));
+              }
+            }
+          }
+        }
+      });
+    } catch (_) {
+      // Keep the current conversation usable if local storage is unavailable.
+    }
+  }
+
+  Future<void> _saveChat() async {
+    final key = _chatStorageKey;
+    if (key == null) return;
+    await _chatStorage.write(key: key, value: jsonEncode({
+      'conversationId': _conversationId,
+      'messages': [for (final message in _aiMessages) {'question': message.question, 'answer': message.answer}],
+    }));
   }
 
   Future<void> _startCommentaryRefreshTimer() async {
@@ -1932,7 +1988,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     if (!mounted || !_isLiveStatus(widget.match, scorecard)) return;
     _commentaryRefreshTimer = Timer.periodic(const Duration(minutes: 1), (_) async {
       await _refreshScorecard();
-      if (mounted && (_selectedTab == 6 || _selectedTab == 7)) await _refreshCommentary();
+      if (mounted) await _refreshCommentary();
     });
   }
 
@@ -2026,6 +2082,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     if (question.isEmpty || _chatSending) return;
     try {
       if (!await _requireLogin()) return;
+      await _chatRestore;
+      if (_chatStorageKey == null) await _restoreChat();
       if (!await _ensureMatchUnlocked()) return;
       if (!mounted) return;
       final loadedScorecard = await _matchScorecard;
@@ -2044,16 +2102,21 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         conversationId: _conversationId,
         isLive: _isLiveStatus(widget.match, statusScorecard),
       );
-      if (!mounted) return;
       final answer = (response['widgets'] ?? response['answer'] ?? '').toString();
       final nextConversation = response['conversationId']?.toString() ?? '';
-      setState(() {
+      void addAnswer() {
         _aiMessages.add((question: question, answer: answer));
         if (nextConversation.isNotEmpty) _conversationId = nextConversation;
         _pendingAiQuestion = null;
         _selectedTab = 1;
-      });
-      _scrollLatestAiContentIntoView();
+      }
+      if (mounted) { setState(addAnswer); } else { addAnswer(); }
+      try {
+        await _saveChat();
+      } catch (_) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not save this chat on your device.')));
+      }
+      if (mounted) _scrollLatestAiContentIntoView();
     } on AuthException catch (error) {
       if (mounted) {
         setState(() { _pendingAiQuestion = null; _question.text = question; });
@@ -2071,14 +2134,14 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
 
   Future<Map<String, dynamic>?> _loadDetailScorecard() async {
     if (widget.match.matchId.isEmpty) return _detailScorecardData ?? widget.scorecard;
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     try {
       final uri = Uri.https('api.spoda.ai', '/match-scorecard', {'matchId': widget.match.matchId});
-      final request = await client.getUrl(uri);
+      final request = await client.getUrl(uri).timeout(const Duration(seconds: 20));
       request.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
-      final response = await request.close();
+      final response = await request.close().timeout(const Duration(seconds: 20));
       if (response.statusCode < 200 || response.statusCode >= 300) return _detailScorecardData ?? widget.scorecard;
-      final payload = jsonDecode(await response.transform(utf8.decoder).join());
+      final payload = jsonDecode(await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 20)));
       if (payload is Map) {
         _detailScorecardData = Map<String, dynamic>.from(payload);
         return _detailScorecardData;
@@ -2471,12 +2534,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Future<Map<String, dynamic>?> _loadSwitcherScorecard(MatchData match) async {
     if (match.matchId == widget.match.matchId) return widget.scorecard ?? await _matchScorecard;
     if (match.matchId.isEmpty) return null;
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     try {
       final uri = Uri.https('api.spoda.ai', '/match-scorecard', {'matchId': match.matchId});
-      final response = await (await client.getUrl(uri)).close();
+      final request = await client.getUrl(uri).timeout(const Duration(seconds: 20));
+      final response = await request.close().timeout(const Duration(seconds: 20));
       if (response.statusCode < 200 || response.statusCode >= 300) return null;
-      final payload = jsonDecode(await response.transform(utf8.decoder).join());
+      final payload = jsonDecode(await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 20)));
       return payload is Map ? Map<String, dynamic>.from(payload) : null;
     } catch (_) {
       return null;
@@ -2631,7 +2695,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
                 Expanded(child: _detailTeam(widget.match, 'B', rightAlign: true, scorecard: scorecard)),
               ]);
             },
-          )), 
+          )),
+          _liveOverBar(),
           Container(
             height: 48,
             decoration: BoxDecoration(
@@ -2688,6 +2753,63 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       }
     }
     return const [];
+  }
+
+  Widget _liveOverBar() => FutureBuilder<List<Map<String, dynamic>?>>(
+    future: Future.wait(_commentaryInningsData),
+    builder: (context, snapshot) {
+      final responses = snapshot.data ?? _commentaryResponses;
+      Map<String, dynamic>? active;
+      for (final response in responses) {
+        final match = response?['match'];
+        if (match is Map && match['status']?.toString() == '3' &&
+            _commentaryInning(response)?['status']?.toString() == '3') {
+          active = response;
+          break;
+        }
+      }
+      if (active == null) return const SizedBox.shrink();
+      final overs = _oversForInning(active);
+      final numbers = overs.keys.map(int.tryParse).whereType<int>().toList()..sort();
+      if (numbers.isEmpty) return const SizedBox.shrink();
+      final number = numbers.last;
+      final balls = overs['$number']!.where((ball) {
+        final event = (ball['event'] ?? 'ball').toString().toLowerCase();
+        return event == 'ball' || event == 'wicket';
+      }).toList();
+      if (balls.isEmpty) return const SizedBox.shrink();
+      final total = balls.fold<int>(0, (sum, ball) => sum + (int.tryParse((ball['run'] ?? ball['score'] ?? 0).toString()) ?? 0));
+      return Container(
+        height: 38,
+        decoration: const BoxDecoration(color: Color(0xFF151515), border: Border(bottom: BorderSide(color: Color(0xFF303030)))),
+        child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 16), children: [
+          Center(child: Text('Over ${number + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600))),
+          const SizedBox(width: 8),
+          for (final ball in balls) ...[
+            Center(child: _liveOverBall(ball)),
+            const SizedBox(width: 5),
+          ],
+          Center(child: Text('= $total', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold))),
+        ]),
+      );
+    },
+  );
+
+  Widget _liveOverBall(Map<String, dynamic> ball) {
+    final run = int.tryParse((ball['run'] ?? ball['score'] ?? 0).toString()) ?? 0;
+    final wicket = (ball['event'] ?? '').toString().toLowerCase() == 'wicket' || ball['wicket'] == true || ball['noball_dismissal'] == true;
+    final wide = ball['wideball'] == true || (int.tryParse('${ball['wide_run'] ?? 0}') ?? 0) > 0;
+    final noBall = ball['noball'] == true || (int.tryParse('${ball['noball_run'] ?? 0}') ?? 0) > 0;
+    final bye = int.tryParse('${ball['bye_run'] ?? 0}') ?? 0;
+    final legBye = int.tryParse('${ball['legbye_run'] ?? 0}') ?? 0;
+    final label = '${wide ? 'wd$run' : noBall ? 'nb$run' : bye > 0 ? 'b$run' : legBye > 0 ? 'lb$run' : wicket && run == 0 ? 'W' : run == 0 ? '·' : '$run'}${wicket && run > 0 ? ' W' : ''}';
+    return Container(
+      constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: _ballCircleColor(ball), borderRadius: BorderRadius.circular(10)),
+      child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)),
+    );
   }
 
   String _inningsTeamName(Map<String, dynamic>? response, int index) {
@@ -4243,6 +4365,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _squadBorder))),
         child: ListTile(
           dense: true,
+          leading: _predictionRoleIcon(isBowler: !isBowler),
           title: Text(row.$1, style: const TextStyle(fontSize: 12)),
           subtitle: Text((isBowler ? _bowlerComparisonMetric : _comparisonMetric) == 0 ? 'Probable Dismissal Rate' : 'Probable Strike Rate', style: const TextStyle(fontSize: 10, color: AppColors.muted)),
           trailing: Text(row.$2, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.white)),
@@ -4298,6 +4421,14 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     onChanged: onChanged,
   ));
 
+  Widget _predictionRoleIcon({required bool isBowler}) => SizedBox(
+    width: 20,
+    height: 20,
+    child: Center(child: isBowler
+        ? Container(width: 9, height: 9, decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 1.5)))
+        : Image.asset('assets/Cricket-bat.png', width: 20, height: 20, color: Colors.white, fit: BoxFit.contain)),
+  );
+
   Widget _topBatterRow(Map<String, dynamic> player) {
     final name = (player['playerName'] ?? player['player_name'] ?? player['fullName'] ?? player['name'] ?? player['batsmanName'] ?? 'Player').toString();
     final image = (player['image'] ?? player['imageUrl'] ?? player['image_url'] ?? player['photo'] ?? player['thumb_url'] ?? '').toString();
@@ -4305,7 +4436,11 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final display = _squadPercentage(probability);
     return Container(decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: _squadBorder))), child: ListTile(
       dense: true,
-      leading: CircleAvatar(radius: 18, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 20, color: AppColors.muted) : null),
+      leading: Row(mainAxisSize: MainAxisSize.min, children: [
+        _predictionRoleIcon(isBowler: _squadFilter == 2),
+        const SizedBox(width: 8),
+        CircleAvatar(radius: 18, backgroundColor: AppColors.surface, backgroundImage: image.isNotEmpty ? NetworkImage(image) : null, child: image.isEmpty ? const Icon(Icons.person, size: 20, color: AppColors.muted) : null),
+      ]),
       title: Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
       trailing: Text(display, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white)),
     ));

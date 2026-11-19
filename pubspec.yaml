@@ -83,6 +83,7 @@ flutter:
     - assets/logo_spoda.png
     - assets/ailogo.png
     - assets/chat-icon.png
+    - assets/Cricket-bat.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
