@@ -84,6 +84,7 @@ flutter:
     - assets/ailogo.png
     - assets/chat-icon.png
     - assets/Cricket-bat.png
+    - assets/Cricket-ball.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
