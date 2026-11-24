@@ -16,7 +16,7 @@ import 'auth_service.dart';
 void main() => runApp(const SpodaApp());
 
 abstract final class AppColors {
-  static const background = Color(0xFF000000); //0xFF090909 0xFF404040
+  static const background = Color(0xFF070707);
   static const surface = Color(0xFF151515);
   static const border = Color(0xFF333333);
   static const muted = Color(0xFFAAAAAA);
@@ -1886,6 +1886,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   String? _chatStorageKey;
   final Set<int> _expandedAiAnswers = {};
   final GlobalKey _latestAiContentKey = GlobalKey();
+  final GlobalKey _overBarKey = GlobalKey();
   String? _pendingAiQuestion;
   String _conversationId = '';
   bool _chatSending = false;
@@ -1931,6 +1932,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   int _commentaryInnings = 0;
   final Set<String> _expandedOvers = <String>{};
   Timer? _commentaryRefreshTimer;
+  Timer? _predictionRefreshTimer;
+  Future<Map<String, dynamic>?>? _overEndPrediction;
   bool _refreshingCommentary = false;
   List<Future<Map<String, dynamic>?>> _commentaryInningsData = [];
   final List<Map<String, dynamic>?> _commentaryResponses = [null, null];
@@ -1969,6 +1972,22 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     _commentaryInningsData = [_loadCommentaryInnings(1), _loadCommentaryInnings(2)];
     _chatRestore = _restoreChat();
     _startCommentaryRefreshTimer();
+  }
+
+  void _selectDetailTab(int tab) {
+    if (_selectedTab == tab) return;
+    _predictionRefreshTimer?.cancel();
+    _predictionRefreshTimer = null;
+    _selectedTab = tab;
+    if (tab == 1) {
+      _overEndPrediction = _loadOverEndPrediction();
+      _predictionRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+        if (mounted && _selectedTab == 1) {
+          final prediction = _loadOverEndPrediction();
+          setState(() { _overEndPrediction = prediction; });
+        }
+      });
+    }
   }
 
   Future<void> _restoreChat() async {
@@ -2124,7 +2143,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         _chatSending = true;
         _pendingAiQuestion = question;
         _question.clear();
-        _selectedTab = 1;
+        _selectDetailTab(1);
       });
       _scrollLatestAiContentIntoView();
       final response = await AuthService.instance.sendAgentMessage(
@@ -2139,7 +2158,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         _aiMessages.add((question: question, answer: answer));
         if (nextConversation.isNotEmpty) _conversationId = nextConversation;
         _pendingAiQuestion = null;
-        _selectedTab = 1;
+        if (mounted) _selectDetailTab(1);
       }
       if (mounted) { setState(addAnswer); } else { addAnswer(); }
       try {
@@ -2543,7 +2562,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   }
 
   @override
-  void dispose() { _commentaryRefreshTimer?.cancel(); _question.dispose(); super.dispose(); }
+  void dispose() { _commentaryRefreshTimer?.cancel(); _predictionRefreshTimer?.cancel(); _question.dispose(); super.dispose(); }
 
   bool _switcherIsLive(MatchData match, [Map<String, dynamic>? scorecard]) => _isLiveStatus(match, scorecard);
   bool _switcherIsDone(MatchData match, [Map<String, dynamic>? scorecard]) => _isCompletedStatus(match, scorecard);
@@ -2597,14 +2616,20 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       return !isToday && !isTomorrow;
     }).toList();
 
+    final bar = _overBarKey.currentContext?.findRenderObject();
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final top = bar is RenderBox && bar.hasSize
+        ? bar.localToGlobal(Offset.zero).dy + bar.size.height
+        : MediaQuery.paddingOf(context).top + kToolbarHeight;
+    final sheetHeight = (screenHeight - top).clamp(0.0, screenHeight);
     final selected = await showModalBottomSheet<(MatchData, Map<String, dynamic>?)>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF111111),
+      backgroundColor: const Color(0xFF151515),
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(14))),
       builder: (sheetContext) => SafeArea(
         child: SizedBox(
-          height: MediaQuery.sizeOf(sheetContext).height * .76,
+          height: (sheetHeight - MediaQuery.paddingOf(sheetContext).bottom).clamp(0.0, sheetHeight),
           child: Column(children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 12, 8),
@@ -2685,6 +2710,12 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final selectedTab = visibleTabs.contains(_selectedTab)
           ? _selectedTab
           : visibleTabs.first;
+      if (selectedTab != _selectedTab) {
+        final previousTab = _selectedTab;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _selectedTab == previousTab) setState(() => _selectDetailTab(selectedTab));
+        });
+      }
       return Scaffold(
         appBar: AppBar(
           backgroundColor: const Color(0xFF151515),
@@ -2713,7 +2744,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
               final completed = _switcherIsDone(widget.match, scorecard);
               final startingSoon = startDate != null && startDate.isAfter(DateTime.now());
               return Row(children: [
-                Expanded(child: _detailTeamWithEvents(widget.match, 'A', scorecard: scorecard)),
+                Expanded(child: _detailTeamWithEvents(widget.match, 'A', scorecard: scorecard, live: live)),
                 Column(mainAxisSize: MainAxisSize.min, children: live
                     ? [const Text('Live', style: TextStyle(color: AppColors.red, fontSize: 16, fontWeight: FontWeight.bold))]
                     : completed
@@ -2723,11 +2754,11 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
                         const SizedBox(height: 3),
                         Text(startingSoon ? _detailCountdown(startDate) : startDate == null ? 'Match details' : _detailTime(startDate), style: const TextStyle(color: Color(0xFFFF8D45), fontSize: 16)),
                       ]),
-                Expanded(child: _detailTeamWithEvents(widget.match, 'B', rightAlign: true, scorecard: scorecard)),
+                Expanded(child: _detailTeamWithEvents(widget.match, 'B', rightAlign: true, scorecard: scorecard, live: live)),
               ]);
             },
           )),
-          _liveOverBar(),
+          KeyedSubtree(key: _overBarKey, child: _liveOverBar()),
           Container(
             height: 48,
             decoration: BoxDecoration(
@@ -2741,7 +2772,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
               final i = visibleTabs[index];
               final label = _tabs[i];
               return InkWell(
-                onTap: () => setState(() => _selectedTab = i),
+                onTap: () => setState(() => _selectDetailTab(i)),
                 child: Container(
                   height: 48,
                   decoration: BoxDecoration(border: Border(bottom: BorderSide(color: selectedTab == i ? const Color(0xFFE7FF00) : Colors.transparent, width: 2))),
@@ -2831,7 +2862,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           },
         )),
         InkWell(
-          onTap: () => setState(() => _selectedTab = 6),
+          onTap: () => setState(() => _selectDetailTab(6)),
           child: const Padding(
             padding: EdgeInsets.symmetric(horizontal: 10),
             child: Row(mainAxisSize: MainAxisSize.min, children: [Text('Overs', style: TextStyle(fontSize: 11, color: AppColors.muted)), Icon(Icons.chevron_right, size: 18)]),
@@ -2951,8 +2982,9 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final inning = _commentaryInning(response);
     final battingTeamId = inning?['batting_team_id']?.toString();
     final mappedSide = _scorecardSideForTeamId(battingTeamId);
-    final suffix = mappedSide ?? (index == 0 ? 'A' : 'B');
-    final scorecardTeam = widget.match.teamName(suffix, scorecard: widget.scorecard).trim();
+    final firstSide = _scorecardSideForTeamId(_commentaryInning(_commentaryResponses[0])?['batting_team_id']?.toString());
+    final suffix = mappedSide ?? (index == 1 && firstSide != null ? (firstSide == 'A' ? 'B' : 'A') : (index == 0 ? 'A' : 'B'));
+    final scorecardTeam = widget.match.teamName(suffix, scorecard: _detailScorecardData ?? widget.scorecard).trim();
     final feedTeam = (inning?['short_name'] ?? inning?['team_short_name'] ?? inning?['shortname'] ?? inning?['name'] ?? '').toString().trim();
     final normalizedFeedTeam = feedTeam.replaceFirst(RegExp(r'\s+Inning$', caseSensitive: false), '').trim();
     var team = mappedSide != null
@@ -2966,10 +2998,11 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
 
   Widget _commentaryTeamScoreHeading(Map<String, dynamic>? response, int index, {required bool selected, required VoidCallback onTap}) {
     final inning = _commentaryInning(response);
-    final suffix = _scorecardSideForTeamId(inning?['batting_team_id']?.toString()) ?? (index == 0 ? 'A' : 'B');
+    final firstSide = _scorecardSideForTeamId(_commentaryInning(_commentaryResponses[0])?['batting_team_id']?.toString());
+    final suffix = _scorecardSideForTeamId(inning?['batting_team_id']?.toString()) ?? (index == 1 && firstSide != null ? (firstSide == 'A' ? 'B' : 'A') : (index == 0 ? 'A' : 'B'));
     final team = _commentaryTeamShortName(response, index);
     final inningScore = (inning?['scores'] ?? '').toString().trim();
-    final scorecardScore = widget.match.teamScore(suffix, scorecard: widget.scorecard);
+    final scorecardScore = widget.match.teamScore(suffix, scorecard: _detailScorecardData ?? widget.scorecard);
     // The commentary innings score belongs to the displayed batting team.
     // Scorecard team A/B order can differ from the innings order, so prefer
     // the innings feed to keep the name and score paired correctly.
@@ -2978,19 +3011,17 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return InkWell(
       onTap: onTap,
       child: Container(
-        width: 128,
-        height: 36,
+        height: 32,
         alignment: Alignment.center,
-        margin: const EdgeInsets.only(left: 5, top: 5, bottom: 5),
-        color: selected ? AppColors.acid : const Color(0xFF171717),
+        decoration: BoxDecoration(color: selected ? AppColors.acid : const Color(0xFF151515), border: Border.all(color: selected ? AppColors.acid : const Color(0xFF404040))),
         child: Text(
           '$team - $score',
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(
-            color: selected ? Colors.black : Colors.white,
+            color: selected ? Colors.black : AppColors.muted,
             fontSize: 16,
-            fontWeight: FontWeight.w700,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
           ),
         ),
       ),
@@ -3143,7 +3174,10 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       if (snapshot.hasError && responses.every((response) => response == null)) return _askAiStatus('Commentary is not available right now.');
       final rows = _commentaryRows(responses[_commentaryInnings]);
       return Column(children: [
-        Row(mainAxisAlignment: MainAxisAlignment.start, children: [for (var i = 0; i < 2; i++) _commentaryTeamScoreHeading(responses[i], i, selected: _commentaryInnings == i, onTap: () => setState(() => _commentaryInnings = i))]),
+        Padding(padding: const EdgeInsets.fromLTRB(12, 8, 12, 8), child: Row(children: [for (var i = 0; i < 2; i++) ...[
+          if (i > 0) const SizedBox(width: 10),
+          Expanded(child: _commentaryTeamScoreHeading(responses[i], i, selected: _commentaryInnings == i, onTap: () => setState(() => _commentaryInnings = i))),
+        ]])),
         Expanded(child: rows.isEmpty
           ? ListView(children: [const Padding(padding: EdgeInsets.all(20), child: Center(child: Text('No commentary available yet.', style: TextStyle(color: AppColors.muted)))), _askAiSection()])
           : ListView.builder(
@@ -3318,11 +3352,11 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final selected = _scorecardInnings.clamp(0, innings.length - 1);
       final inning = innings[selected];
       return Column(children: [
-        if (innings.length > 1) SizedBox(height: 46, child: ListView.separated(
+        if (innings.length > 1) SizedBox(height: 48, child: LayoutBuilder(builder: (context, constraints) => ListView.separated(
           scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 5),
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
           itemCount: innings.length,
-          separatorBuilder: (_, _) => const SizedBox(width: 0),
+          separatorBuilder: (_, _) => const SizedBox(width: 10),
           itemBuilder: (context, index) {
             final active = index == selected;
             final tabInning = innings[index];
@@ -3333,13 +3367,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             final inningsScore = (tabInning['scores'] ?? '').toString().trim();
             final score = inningsScore.isNotEmpty ? inningsScore : teamScore;
             return InkWell(onTap: () => setState(() => _scorecardInnings = index), child: Container(
-              width: 128, height: 36, margin: const EdgeInsets.only(right: 5),
-              alignment: Alignment.center, color: active ? AppColors.acid : const Color(0xFF171717),
+              width: (constraints.maxWidth - 34) / 2, height: 32,
+              alignment: Alignment.center, decoration: BoxDecoration(color: active ? AppColors.acid : const Color(0xFF151515), border: Border.all(color: active ? AppColors.acid : const Color(0xFF404040))),
               child: Text('$team - $score', maxLines: 1, overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: active ? Colors.black : Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+                style: TextStyle(color: active ? Colors.black : AppColors.muted, fontSize: 16, fontWeight: active ? FontWeight.w700 : FontWeight.w500)),
             ));
           },
-        )),
+        ))),
         Expanded(child: ListView(padding: const EdgeInsets.fromLTRB(12, 8, 12, 16), children: [
           _scorecardSection('Batter', _scorecardRows(inning['batsmen'])),
           _scorecardInningExtras(inning),
@@ -4521,7 +4555,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     child: Text(label, style: TextStyle(color: _squadFilter == index ? Colors.black : AppColors.muted, fontSize: 11, fontWeight: FontWeight.w600)),
   ));
 
-  Widget _detailTeamWithEvents(MatchData match, String side, {bool rightAlign = false, Map<String, dynamic>? scorecard}) => FutureBuilder<List<Map<String, dynamic>?>>(
+  Widget _detailTeamWithEvents(MatchData match, String side, {bool rightAlign = false, Map<String, dynamic>? scorecard, bool live = false}) => FutureBuilder<List<Map<String, dynamic>?>>(
     future: Future.wait(_commentaryInningsData),
     builder: (context, snapshot) {
       Map<String, dynamic>? active;
@@ -4539,17 +4573,19 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       }
       final battingSide = _scorecardSideForTeamId(_commentaryInning(active)?['batting_team_id']?.toString(), scorecard);
       final balls = _commentaryRows(active).where((row) => row['event']?.toString().trim().toLowerCase() == 'ball').toList();
-      final isBatting = battingSide == side;
+      final displaySide = live && battingSide != null
+          ? (rightAlign ? (battingSide == 'A' ? 'B' : 'A') : battingSide)
+          : side;
       final inning = _commentaryInning(active);
-      final scoreText = (inning?['scores'] ?? match.teamScore(side, scorecard: scorecard)).toString();
+      final scoreText = (inning?['scores'] ?? match.teamScore(displaySide, scorecard: scorecard)).toString();
       final runs = int.tryParse(scoreText.split('/').first.trim());
-      final oversText = (inning?['overs'] ?? match.teamOvers(side, scorecard: scorecard)).toString();
+      final oversText = (inning?['overs'] ?? match.teamOvers(displaySide, scorecard: scorecard)).toString();
       final overParts = oversText.split('.');
       final completedOvers = int.tryParse(overParts.first);
       final extraBalls = overParts.length > 1 ? int.tryParse(overParts[1]) : 0;
       final legalBalls = completedOvers == null || extraBalls == null ? null : completedOvers * 6 + extraBalls;
       final rate = runs == null || legalBalls == null ? null : legalBalls == 0 ? 0.0 : runs * 6 / legalBalls;
-      final firstInning = _commentaryInning(responses[0]);
+      final firstInning = responses.isEmpty ? null : _commentaryInning(responses[0]);
       final firstScore = activeIndex == 1 && firstInning != null ? firstInning['scores']?.toString() : null;
       final firstRuns = firstScore == null ? null : int.tryParse(firstScore.split('/').first.trim());
       final feedMatch = active?['match'];
@@ -4557,8 +4593,12 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           ? int.tryParse((inning?['target'] ?? (feedMatch is Map ? feedMatch['target'] : null) ?? '').toString()) ??
               (firstRuns == null ? null : firstRuns + 1)
           : null;
-      return _detailTeam(match, side, rightAlign: rightAlign, scorecard: scorecard,
-          battingBalls: isBatting ? balls : null, runRate: isBatting ? rate : null, target: isBatting ? target : null);
+      final showLiveInning = live && battingSide != null;
+      return _detailTeam(match, displaySide, rightAlign: rightAlign, scorecard: scorecard,
+          eventBalls: showLiveInning && rightAlign ? balls : null,
+          scoreOverride: showLiveInning && !rightAlign ? scoreText : null,
+          oversOverride: showLiveInning && !rightAlign ? oversText : null,
+          runRate: showLiveInning && !rightAlign ? rate : null, target: showLiveInning && !rightAlign ? target : null);
     },
   );
 
@@ -4573,19 +4613,19 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return '$runs ${runs == 1 ? 'Run' : 'Runs'}';
   }
 
-  Widget _detailTeam(MatchData match, String side, {bool rightAlign = false, Map<String, dynamic>? scorecard, List<Map<String, dynamic>>? battingBalls, double? runRate, int? target}) {
+  Widget _detailTeam(MatchData match, String side, {bool rightAlign = false, Map<String, dynamic>? scorecard, List<Map<String, dynamic>>? eventBalls, String? scoreOverride, String? oversOverride, double? runRate, int? target}) {
     final name = match.teamName(side, scorecard: scorecard);
     final logo = match.teamFlag(side, scorecard: scorecard);
-    final score = match.teamScore(side, scorecard: scorecard);
-    final overs = match.teamOvers(side, scorecard: scorecard);
+    final score = scoreOverride ?? match.teamScore(side, scorecard: scorecard);
+    final overs = oversOverride ?? match.teamOvers(side, scorecard: scorecard);
     final badge = logo == null || logo.isEmpty
         ? const Icon(Icons.shield, size: 25, color: AppColors.muted)
         : ClipOval(child: Image.network(logo, width: 25, height: 25, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 25, color: AppColors.muted)));
     return Column(crossAxisAlignment: rightAlign ? CrossAxisAlignment.end : CrossAxisAlignment.start, children: [
-      if (battingBalls != null)
+      if (eventBalls != null)
         SizedBox(height: 25, child: Align(
           alignment: rightAlign ? Alignment.centerRight : Alignment.centerLeft,
-          child: Text(battingBalls.isEmpty ? '' : _headerBallEvent(battingBalls.last),
+          child: Text(eventBalls.isEmpty ? '' : _headerBallEvent(eventBalls.last),
               maxLines: 1, overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: Color(0xFFE7FF00), fontWeight: FontWeight.w700, fontSize: 18)),
         ))
@@ -4594,8 +4634,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         Flexible(child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 20))),
         if (rightAlign) ...[const SizedBox(width: 7), badge],
       ]),
-      if (score != 'Yet to bat')
-        Padding(padding: EdgeInsets.only(top: 3, left: rightAlign || battingBalls != null ? 0 : 32, right: rightAlign && battingBalls == null ? 32 : 0), child: Text('$score${overs.isEmpty ? '' : ' ($overs ov)'}', textAlign: rightAlign ? TextAlign.right : TextAlign.left, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+      if (eventBalls == null && score != 'Yet to bat')
+        Padding(padding: const EdgeInsets.only(top: 3), child: Text('$score${overs.isEmpty ? '' : ' ($overs ov)'}', textAlign: rightAlign ? TextAlign.right : TextAlign.left, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
       if (runRate != null)
         Text('CRR: ${runRate.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, color: AppColors.muted)),
       if (target != null)
@@ -4625,7 +4665,110 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     });
   }
 
+  Future<Map<String, dynamic>?> _loadOverEndPrediction() async {
+    final id = widget.match.matchId.trim();
+    if (id.isEmpty) return null;
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final response = await (await client.getUrl(Uri.https('api.spoda.ai', '/overend-predictions/${Uri.encodeComponent(id)}'))).close();
+      if (response.statusCode < 200 || response.statusCode >= 300) return null;
+      final data = jsonDecode(await response.transform(utf8.decoder).join());
+      return data is Map ? Map<String, dynamic>.from(data) : null;
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Widget _predictionMetric(String value, String label, {Widget? leading}) => Expanded(child: Column(children: [
+    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+      if (leading != null) ...[leading, const SizedBox(width: 5)],
+      Flexible(child: Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600))),
+    ]),
+    const SizedBox(height: 4),
+    Text(label, maxLines: 1, style: const TextStyle(color: AppColors.muted, fontSize: 9)),
+  ]));
+
+  Widget _askAiPrediction() => FutureBuilder<Map<String, dynamic>?>(
+    future: _overEndPrediction,
+    builder: (context, snapshot) {
+      final data = snapshot.data;
+      final metadata = data?['matchWinnerMetadata'];
+      if (metadata is! Map || metadata['win_probability'] is! List) return const SizedBox.shrink();
+      final probabilities = (metadata['win_probability'] as List).whereType<Map>().where((item) => double.tryParse('${item['probability']}') != null).toList()
+        ..sort((a, b) => double.parse('${b['probability']}').compareTo(double.parse('${a['probability']}')));
+      if (probabilities.isEmpty) return const SizedBox.shrink();
+      final winner = probabilities.first;
+      final team = winner['team'];
+      final teamName = team is Map ? (team['name'] ?? '').toString() : team?.toString() ?? '';
+      final teamId = team is Map ? team['id']?.toString() : null;
+      String? side = _scorecardSideForTeamId(teamId, _detailScorecardData);
+      for (final candidate in ['A', 'B']) {
+        if (side == null && widget.match.teamName(candidate, scorecard: _detailScorecardData, fullName: true).toLowerCase() == teamName.toLowerCase()) side = candidate;
+      }
+      final displayName = side == null ? teamName : widget.match.teamName(side, scorecard: _detailScorecardData);
+      final logo = side == null ? null : widget.match.teamFlag(side, scorecard: _detailScorecardData);
+      final probability = double.parse('${winner['probability']}');
+      final percent = '${probability.toStringAsFixed(probability % 1 == 0 ? 0 : 1)}%';
+      final projected = data?['projectedScoreMetadata'];
+      final prediction = projected is Map ? projected['prediction'] : null;
+      final chase = projected is Map ? projected['chase'] : null;
+      String score = '—';
+      if (prediction is Map) {
+        final low = prediction['min'] ?? prediction['low'] ?? prediction['lower'];
+        final high = prediction['max'] ?? prediction['high'] ?? prediction['upper'];
+        score = low != null && high != null ? '$low–$high' : (prediction['score'] ?? prediction['value'] ?? '—').toString();
+      } else if (prediction != null) {
+        score = prediction.toString();
+      } else if (chase is Map && chase['target'] != null) {
+        score = 'Target ${chase['target']}';
+      }
+      final updated = DateTime.tryParse(data?['updatedAt']?.toString() ?? '')?.toLocal();
+      final at = metadata['at'];
+      final over = at is Map ? at['overs'] : null;
+      final timeLabel = [if (updated != null) _detailTime(updated), if (over != null) 'Updated after $over overs'].join(' · ');
+      final reasons = metadata['justification'];
+      final justification = reasons is List ? reasons.map((e) => e.toString()).where((e) => e.trim().isNotEmpty).toList() : reasons is String && reasons.trim().isNotEmpty ? [reasons] : <String>[];
+      final metrics = Row(children: [
+        _predictionMetric(displayName, 'Predicted Winner', leading: logo == null || logo.isEmpty ? null : Image.network(logo, width: 18, height: 18, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 18, color: AppColors.muted))),
+        _predictionMetric(percent, 'Win Probability'),
+        _predictionMetric(score, 'Projected Score'),
+      ]);
+      return Container(
+        margin: const EdgeInsets.fromLTRB(12, 12, 12, 0), padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(color: const Color(0xFF151515), border: Border.all(color: AppColors.border), borderRadius: BorderRadius.circular(10)),
+        child: Column(children: [
+          if (timeLabel.isNotEmpty) ...[Row(children: [
+            if (updated != null) ...[const Icon(Icons.access_time, size: 13, color: AppColors.muted), const SizedBox(width: 5), Text(_detailTime(updated), style: const TextStyle(color: AppColors.muted, fontSize: 10))],
+            const Spacer(),
+            if (over != null) Text('Updated after $over overs', style: const TextStyle(color: AppColors.muted, fontSize: 10)),
+          ]), const Divider(color: AppColors.border)],
+          Row(children: [Expanded(child: metrics), if (justification.isNotEmpty) TextButton(onPressed: () => showModalBottomSheet<void>(
+            context: context, isScrollControlled: true, backgroundColor: const Color(0xFF151515),
+            shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+            builder: (context) {
+              final bar = _overBarKey.currentContext?.findRenderObject();
+              final top = bar is RenderBox && bar.hasSize ? bar.localToGlobal(Offset.zero).dy + bar.size.height : MediaQuery.of(context).padding.top + kToolbarHeight;
+              final maxHeight = (MediaQuery.of(context).size.height - top).clamp(0.0, MediaQuery.of(context).size.height);
+              return ConstrainedBox(constraints: BoxConstraints(maxHeight: maxHeight), child: SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(20, 10, 20, 20), child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Container(width: 36, height: 4, decoration: BoxDecoration(color: AppColors.muted, borderRadius: BorderRadius.circular(4))),
+              Row(children: [Expanded(child: Text(timeLabel, style: const TextStyle(color: AppColors.muted, fontSize: 11))), IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close))]),
+              metrics, const Divider(height: 28, color: AppColors.border),
+              Flexible(child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                if ((data?['matchWinnerPrediction']?.toString() ?? '').isNotEmpty) Padding(padding: const EdgeInsets.only(bottom: 16), child: Text(data!['matchWinnerPrediction'].toString().split(RegExp(r'Justification:', caseSensitive: false)).first.trim(), style: const TextStyle(fontSize: 13, height: 1.5))),
+                for (final reason in justification) Padding(padding: const EdgeInsets.only(bottom: 16), child: Text('• $reason', style: const TextStyle(fontSize: 13, height: 1.5))),
+              ]))),
+            ]))));
+            },
+          ), child: const Text('See why?', style: TextStyle(color: AppColors.acid, fontSize: 12))) ]),
+        ]),
+      );
+    },
+  );
+
   Widget _askAiTab() => Column(children: [
+    _askAiPrediction(),
     Expanded(child: _aiMessages.isEmpty && _pendingAiQuestion == null
         ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, children: [
             Image.asset('assets/ailogo.png', width: 34, height: 34),
