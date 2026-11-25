@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
@@ -1065,7 +1066,7 @@ class _HomePageState extends State<HomePage> {
             _liveSlider(_ordered(matchSnapshot.data ?? []))
           else if (matchSnapshot.hasError)
             TextButton(onPressed: () => setState(() { _matches = _loadMatches(); }), child: const Text('Could not load matches. Tap to retry.')),
-          const SizedBox(height: 24), _sectionHeader('Upcoming', () => setState(() { _tab = 1; _matchStatus = 1; _filter = 0; })),
+          _sectionHeader('Upcoming', () => setState(() { _tab = 1; _matchStatus = 1; _filter = 0; }), topPadding: 12),
           if (matchSnapshot.connectionState == ConnectionState.waiting) const SizedBox(height: 100, child: Center(child: CircularProgressIndicator(color: AppColors.acid)))
           else _upcomingMatchCards(_ordered(matchSnapshot.data ?? [])),
           const SizedBox(height: 16), _sectionHeader('News and Blogs', () => setState(() => _tab = 2)),
@@ -1890,7 +1891,12 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   String? _pendingAiQuestion;
   String _conversationId = '';
   bool _chatSending = false;
+  bool _reportUnlocked = false;
+  bool _reportUnlocking = false;
+  bool _matchUnlocked = false;
+  bool _predictionUnlocking = false;
   int _selectedTab = 0;
+  bool _detailTabChosen = false;
   int _statsSubtab = 0;
   int _teamRunMatches = 5;
   int _teamWicketMatches = 5;
@@ -1968,7 +1974,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     super.initState();
     _teamAnalysis = _loadTeamAnalysis();
     _detailScorecardData = widget.scorecard;
+    if (_isCompletedStatus(widget.match, widget.scorecard)) _selectedTab = 5;
     _matchScorecard = _loadDetailScorecard();
+    _matchScorecard.then((scorecard) {
+      if (mounted && !_detailTabChosen && _isCompletedStatus(widget.match, scorecard ?? widget.scorecard)) {
+        setState(() => _selectDetailTab(5));
+      }
+    });
     _commentaryInningsData = [_loadCommentaryInnings(1), _loadCommentaryInnings(2)];
     _chatRestore = _restoreChat();
     _startCommentaryRefreshTimer();
@@ -1980,6 +1992,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     _predictionRefreshTimer = null;
     _selectedTab = tab;
     if (tab == 1) {
+      _checkPredictionUnlock();
       _overEndPrediction = _loadOverEndPrediction();
       _predictionRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
         if (mounted && _selectedTab == 1) {
@@ -2093,27 +2106,78 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     return loggedIn;
   }
 
-  Future<bool> _ensureMatchUnlocked() async {
+  Future<void> _checkPredictionUnlock() async {
+    try {
+      final unlocked = await _checkLogin() && (await AuthService.instance.unlockedMatches()).contains(widget.match.matchId.trim());
+      if (mounted) setState(() => _matchUnlocked = unlocked);
+    } catch (_) {
+      if (mounted) setState(() => _matchUnlocked = false);
+    }
+  }
+
+  Future<void> _unlockPrediction() async {
+    if (_predictionUnlocking) return;
+    setState(() => _predictionUnlocking = true);
+    try {
+      if (await _requireLogin()) await _ensureMatchUnlocked();
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error is AuthException ? error.message : 'Could not unlock the match. Please try again.')));
+    } finally {
+      if (mounted) setState(() => _predictionUnlocking = false);
+    }
+  }
+
+  Future<bool> _ensureMatchUnlocked({bool report = false}) async {
     final matchId = widget.match.matchId.trim();
     if (matchId.isEmpty) throw const AuthException('This match is missing its match ID.');
-    if ((await AuthService.instance.unlockedMatches()).contains(matchId)) return true;
+    if ((await AuthService.instance.unlockedMatches()).contains(matchId)) {
+      if (mounted) setState(() => _matchUnlocked = true);
+      return true;
+    }
 
     final passes = await AuthService.instance.remainingPasses();
     var eligible = false;
     if (passes <= 0) eligible = await AuthService.instance.freeTrialEligible();
     if (!mounted) return false;
 
-    final action = await showDialog<String>(context: context, builder: (dialogContext) => AlertDialog(
-      backgroundColor: AppColors.surface,
-      title: const Text('Unlock this match'),
-      content: Text(passes > 0
-          ? 'Use 1 pass to chat with Spoda AI about this match.'
-          : eligible ? 'Activate your free trial to chat with Spoda AI about this match.' : 'You need a pass to chat with Spoda AI about this match.'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
-        TextButton(onPressed: () => Navigator.pop(dialogContext, passes > 0 ? 'pass' : eligible ? 'trial' : 'buy'), child: Text(passes > 0 ? 'Unlock match with 1 pass' : eligible ? 'Activate free trial' : 'Buy More Passes', style: const TextStyle(color: AppColors.acid))),
-      ],
-    ));
+    var progress = 0.0;
+    final action = await showModalBottomSheet<String>(context: context, backgroundColor: AppColors.surface, shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20)), side: BorderSide(color: AppColors.border)), builder: (sheetContext) => StatefulBuilder(builder: (context, setSheetState) => SafeArea(child: Padding(
+      padding: const EdgeInsets.fromLTRB(28, 8, 28, 24),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Container(width: 36, height: 4, decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(4))),
+        const SizedBox(height: 24),
+        const Text('Unlock this match to get full access to this match', textAlign: TextAlign.center, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        Text(passes > 0 || eligible ? 'Swipe to unlock the match' : 'Get a pass to unlock the match', style: const TextStyle(fontSize: 11, color: AppColors.muted)),
+        const SizedBox(height: 16),
+        if (passes > 0 || eligible)
+          LayoutBuilder(builder: (context, constraints) {
+            const thumbSize = 40.0;
+            final travel = math.max(0.0, constraints.maxWidth - thumbSize);
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onHorizontalDragUpdate: (details) => setSheetState(() => progress = (progress + details.delta.dx / (travel == 0 ? 1 : travel)).clamp(0.0, 1.0)),
+              onHorizontalDragEnd: (_) {
+                if (progress >= 0.85) {
+                  Navigator.pop(sheetContext, passes > 0 ? 'pass' : 'trial');
+                } else {
+                  setSheetState(() => progress = 0);
+                }
+              },
+              child: Container(height: thumbSize, decoration: BoxDecoration(border: Border.all(color: AppColors.acid.withOpacity(.45)), borderRadius: BorderRadius.circular(24)), child: Stack(alignment: Alignment.centerLeft, children: [
+                const Center(child: Text('Swipe To Unlock', style: TextStyle(color: AppColors.muted, fontSize: 13))),
+                Positioned(left: travel * progress, child: Container(width: thumbSize - 2, height: thumbSize - 2, decoration: const BoxDecoration(color: AppColors.acid, shape: BoxShape.circle), child: const Icon(Icons.arrow_forward, color: Colors.black, size: 20))),
+              ])),
+            );
+          })
+        else
+          ElevatedButton(onPressed: () => Navigator.pop(sheetContext, 'buy'), style: ElevatedButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background), child: const Text('Buy More Passes')),
+        const SizedBox(height: 20),
+        const Text('By continuing, you agree to the Terms of Service\nand acknowledge our Privacy Policy.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 9, height: 1.5)),
+        const SizedBox(height: 20),
+        Text(passes > 0 ? 'You will use 1 Match Pass' : eligible ? 'You will activate your free trial' : 'A match pass is required', style: const TextStyle(color: AppColors.acid, fontSize: 12, fontWeight: FontWeight.w600)),
+      ]),
+    ))));
     if (!mounted || action == null) return false;
     if (action == 'buy') {
       await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MatchPassesPage()));
@@ -2124,12 +2188,28 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     } else {
       await AuthService.instance.activateFreeTrial(matchId);
     }
+    if (mounted) setState(() => _matchUnlocked = true);
     return true;
+  }
+
+  Future<void> _unlockReport() async {
+    if (_reportUnlocking) return;
+    setState(() => _reportUnlocking = true);
+    try {
+      if (await _requireLogin() && await _ensureMatchUnlocked(report: true) && mounted) {
+        setState(() => _reportUnlocked = true);
+      }
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error is AuthException ? error.message : 'Could not unlock the report. Please try again.')));
+    } finally {
+      if (mounted) setState(() => _reportUnlocking = false);
+    }
   }
 
   Future<void> _submitAiQuestion({bool openAiTab = false}) async {
     final question = _question.text.trim();
     if (question.isEmpty || _chatSending) return;
+    setState(() => _chatSending = true);
     try {
       if (!await _requireLogin()) return;
       await _chatRestore;
@@ -2146,12 +2226,15 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         _selectDetailTab(1);
       });
       _scrollLatestAiContentIntoView();
+      final started = DateTime.now();
       final response = await AuthService.instance.sendAgentMessage(
         collectionId: widget.match.matchId.trim(),
         question: question,
         conversationId: _conversationId,
         isLive: _isLiveStatus(widget.match, statusScorecard),
       );
+      final remaining = const Duration(seconds: 5) - DateTime.now().difference(started);
+      if (remaining > Duration.zero) await Future<void>.delayed(remaining);
       final answer = (response['widgets'] ?? response['answer'] ?? '').toString();
       final nextConversation = response['conversationId']?.toString() ?? '';
       void addAnswer() {
@@ -2727,7 +2810,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           title: _matchTitleMenu(),
         ),
         body: SafeArea(child: Container(
-          color: const Color(0xFF111111),
+          color: AppColors.background,
           child: Column(children: [
           Container(
             decoration: const BoxDecoration(
@@ -2762,7 +2845,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
           Container(
             height: 48,
             decoration: BoxDecoration(
-              color: const Color(0xFF121212),
+              color: AppColors.background,
               border: Border.all(color: const Color(0xFF303030), width: 1),
             ),
             child: ListView.builder(
@@ -2772,7 +2855,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
               final i = visibleTabs[index];
               final label = _tabs[i];
               return InkWell(
-                onTap: () => setState(() => _selectDetailTab(i)),
+                onTap: () => setState(() { _detailTabChosen = true; _selectDetailTab(i); }),
                 child: Container(
                   height: 48,
                   decoration: BoxDecoration(border: Border(bottom: BorderSide(color: selectedTab == i ? const Color(0xFFE7FF00) : Colors.transparent, width: 2))),
@@ -2834,7 +2917,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final overs = _oversForInning(active);
       final numbers = overs.keys.map(int.tryParse).whereType<int>().where((number) =>
           overs['$number']!.any((ball) => ball['event']?.toString().trim().toLowerCase() == 'ball')).toList()
-        ..sort((a, b) => b.compareTo(a));
+        ..sort((a, b) => a.compareTo(b));
       if (numbers.isEmpty) return const SizedBox.shrink();
       return Container(
         height: 38,
@@ -3055,10 +3138,18 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             final over = overKeys[index];
             final rowExpanded = _expandedOvers.contains('0_$over') || _expandedOvers.contains('1_$over');
             final rowHeight = rowExpanded ? 150.0 : 42.0;
-            return AnimatedSize(duration: const Duration(milliseconds: 200), curve: Curves.easeInOut, child: SizedBox(height: rowHeight, child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            return InkWell(onTap: () => setState(() {
+              for (var i = 0; i < 2; i++) {
+                if (rowExpanded) {
+                  _expandedOvers.remove('${i}_$over');
+                } else if (overMaps[i].containsKey(over)) {
+                  _expandedOvers.add('${i}_$over');
+                }
+              }
+            }), child: AnimatedSize(duration: const Duration(milliseconds: 200), curve: Curves.easeInOut, child: SizedBox(height: rowHeight, child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               SizedBox(width: 44, child: Center(child: Text('${(int.tryParse(over) ?? 0) + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)))),
               for (var i = 0; i < 2; i++) Expanded(child: _oversInningsCell(overMaps[i][over], '${i}_$over', responses[i], overMaps[i], over, rowHeight)),
-            ])));
+            ]))));
           },
         )),
       ]);
@@ -3131,13 +3222,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final directName = entries.map((ball) => (ball['bowler_name'] ?? ball['bowlerName'] ?? '').toString().trim()).firstWhere((name) => name.isNotEmpty, orElse: () => '');
     final bowlerName = directName.isNotEmpty ? directName : _commentaryPlayerName(response?['players'], bowlerId) ?? 'Bowler';
     final expanded = _expandedOvers.contains(rowKey);
-    return InkWell(onTap: () => setState(() => expanded ? _expandedOvers.remove(rowKey) : _expandedOvers.add(rowKey)), child: Container(height: rowHeight, padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))), child: expanded ? Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+    return Container(height: rowHeight, padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5), decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border), left: BorderSide(color: AppColors.border))), child: expanded ? Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
       _overScoreText(runs, wickets),
       if (expanded) Wrap(spacing: 3, children: entries.map((ball) { final label = _commentaryBallLabel(ball); return Container(width: 16, height: 16, alignment: Alignment.center, decoration: BoxDecoration(color: _ballCircleColor(ball), shape: BoxShape.circle), child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700))); }).toList()),
       if (expanded) Text.rich(TextSpan(style: const TextStyle(color: Colors.white), children: [const TextSpan(text: 'Bowler: ', style: TextStyle(fontSize: 16)), TextSpan(text: bowlerName, style: const TextStyle(fontSize: 12))]), maxLines: 1, overflow: TextOverflow.ellipsis),
       if (expanded) Text('CRR: ${crr.toStringAsFixed(2)}', maxLines: 1, style: const TextStyle(fontSize: 10, color: AppColors.acid)),
       
-    ]) : Align(alignment: Alignment.centerLeft, child: _overScoreText(runs, wickets))));
+    ]) : Align(alignment: Alignment.centerLeft, child: _overScoreText(runs, wickets)));
   }
 
   Widget _overScoreText(int runs, int wickets) => Text.rich(
@@ -4094,7 +4185,16 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           const Text('Pre-match Report', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
           const SizedBox(height: 10),
-          _reportValue(snapshot.data),
+          if (_reportUnlocked)
+            _reportValue(snapshot.data)
+          else ...[
+            SizedBox(height: 280, child: ClipRect(child: SingleChildScrollView(physics: const NeverScrollableScrollPhysics(), child: _reportValue(snapshot.data)))),
+            Center(child: ElevatedButton(
+              onPressed: _reportUnlocking ? null : _unlockReport,
+              style: ElevatedButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background, shape: const RoundedRectangleBorder()),
+              child: Text(_reportUnlocking ? 'Please wait...' : 'Read Full  ›'),
+            )),
+          ],
           _askAiSection(),
         ]),
       );
@@ -4496,23 +4596,28 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     final selected = items.firstWhere((item) => item.value == value, orElse: () => items.first);
     return PopupMenuButton<T>(
       position: PopupMenuPosition.under,
+      offset: const Offset(0, 8),
       padding: EdgeInsets.zero,
-      color: const Color(0xFF101010),
+      menuPadding: EdgeInsets.zero,
+      color: const Color(0xFF0A0A0A),
+      surfaceTintColor: Colors.transparent,
+      elevation: 12,
       shape: const RoundedRectangleBorder(side: BorderSide(color: _squadBorder)),
-      constraints: BoxConstraints(maxHeight: 240, minWidth: MediaQuery.sizeOf(context).width - 24, maxWidth: MediaQuery.sizeOf(context).width - 24),
+      constraints: BoxConstraints(maxHeight: 260, minWidth: math.min(264, MediaQuery.sizeOf(context).width - 24), maxWidth: math.min(264, MediaQuery.sizeOf(context).width - 24)),
       onSelected: onChanged,
       itemBuilder: (context) => items.where((item) => item.value != null).map((item) => PopupMenuItem<T>(
         value: item.value,
         enabled: item.enabled,
-        height: 44,
-        textStyle: const TextStyle(color: Colors.white, fontSize: 11),
-        child: Row(children: [Expanded(child: item.child), if (item.value == value) const Icon(Icons.check, size: 16, color: Color(0xFF75C45A))]),
+        height: 52,
+        padding: EdgeInsets.zero,
+        textStyle: const TextStyle(color: Colors.white, fontSize: 14),
+        child: Container(height: 52, color: item.value == value ? AppColors.surface : Colors.transparent, padding: const EdgeInsets.symmetric(horizontal: 16), child: Row(children: [Expanded(child: item.child), if (item.value == value) const Icon(Icons.check, size: 23, color: Color(0xFF78C653))])),
       )).toList(),
       child: Container(
-        height: 32,
-        padding: const EdgeInsets.symmetric(horizontal: 9),
-        decoration: BoxDecoration(color: const Color(0xFF101010), border: Border.all(color: _squadBorder)),
-        child: DefaultTextStyle(style: const TextStyle(color: Colors.white, fontSize: 11), child: Row(children: [Expanded(child: selected.child), const Icon(Icons.keyboard_arrow_down, size: 18, color: Colors.white)])),
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(border: Border.all(color: _squadBorder)),
+        child: DefaultTextStyle(style: const TextStyle(color: Colors.white, fontSize: 14), child: Row(children: [Expanded(child: selected.child), const Icon(Icons.keyboard_arrow_down, size: 20, color: Colors.white)])),
       ),
     );
   }
@@ -4744,7 +4849,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             const Spacer(),
             if (over != null) Text('Updated after $over overs', style: const TextStyle(color: AppColors.muted, fontSize: 10)),
           ]), const Divider(color: AppColors.border)],
-          Row(children: [Expanded(child: metrics), if (justification.isNotEmpty) TextButton(onPressed: () => showModalBottomSheet<void>(
+          Row(children: [Expanded(child: _matchUnlocked ? metrics : Stack(alignment: Alignment.center, children: [ImageFiltered(imageFilter: ui.ImageFilter.blur(sigmaX: 5, sigmaY: 5), child: metrics), const Icon(Icons.lock_outline, color: Colors.white, size: 20)])), if (!_matchUnlocked) TextButton(onPressed: _predictionUnlocking ? null : _unlockPrediction, child: const Text('Unlock ›', style: TextStyle(color: AppColors.acid, fontSize: 12))) else if (justification.isNotEmpty) TextButton(onPressed: () => showModalBottomSheet<void>(
             context: context, isScrollControlled: true, backgroundColor: const Color(0xFF151515),
             shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
             builder: (context) {
@@ -4777,7 +4882,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             const SizedBox(height: 7),
             const Text('Get match insights and answers in a conversation.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 12)),
             const SizedBox(height: 14),
-            Wrap(spacing: 7, children: _prompts.map((p) => ActionChip(label: Text(p, style: const TextStyle(fontSize: 11)), onPressed: () => setState(() => _question.text = p), backgroundColor: AppColors.surface, side: const BorderSide(color: AppColors.border))).toList()),
+            Wrap(spacing: 7, children: _prompts.map((p) => ActionChip(label: Text(p, style: const TextStyle(fontSize: 11)), onPressed: _chatSending ? null : () { _question.text = p; _submitAiQuestion(); }, backgroundColor: AppColors.surface, side: const BorderSide(color: AppColors.border))).toList()),
             const SizedBox(height: 10),
             FutureBuilder<bool>(future: _isLoggedIn, builder: (context, snapshot) => snapshot.data == true ? const SizedBox.shrink() : OutlinedButton(onPressed: _requireLogin, child: const Text('Log in to chat', style: TextStyle(color: AppColors.acid)))),
           ])))
@@ -4841,19 +4946,24 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
     const SizedBox(height: 12),
   ]);
 
-  Widget _aiLoadingCard() => Padding(
-    padding: const EdgeInsets.only(bottom: 18),
-    child: Row(
-      children: [
-        Image.asset('assets/chat-icon.png', width: 30, height: 30),
-        const SizedBox(width: 7),
-        const Expanded(
-          child: Text('Spoda AI is thinking…', style: TextStyle(fontSize: 12, color: AppColors.muted)),
-        ),
-      ],
-    ),
+  Widget _aiLoadingCard() => StreamBuilder<int>(
+    stream: Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick + 1),
+    initialData: 0,
+    builder: (context, snapshot) {
+      final seconds = snapshot.data ?? 0;
+      final progress = math.min(seconds / 5, .98);
+      const steps = ['Analyzing past player performance', 'Cross-checking historical data', 'Generating prediction'];
+      return Padding(padding: const EdgeInsets.only(bottom: 18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [Image.asset('assets/chat-icon.png', width: 30, height: 30), const SizedBox(width: 7), const Text('Spoda AI', style: TextStyle(fontSize: 12))]),
+        const SizedBox(height: 8),
+        Container(padding: const EdgeInsets.all(12), color: AppColors.surface, child: Row(children: [
+          Expanded(child: Column(children: [for (var i = 0; i < steps.length; i++) Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Icon(seconds > i ? Icons.check_circle : Icons.circle, size: 12, color: seconds > i ? const Color(0xFF21AE73) : AppColors.border), const SizedBox(width: 6), Expanded(child: Text(steps[i], style: const TextStyle(fontSize: 11)))]))])),
+          const SizedBox(width: 12),
+          SizedBox(width: 55, height: 55, child: Stack(alignment: Alignment.center, children: [CircularProgressIndicator(value: progress, color: const Color(0xFF21AE73), backgroundColor: AppColors.border, strokeWidth: 5), Text('${(progress * 100).round()}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold))])),
+        ])),
+      ]));
+    },
   );
-
   String _formatAiAnswer(String value) => value
       .replaceAll(RegExp(r'^#{1,6}\s*', multiLine: true), '')
       .replaceAll('**', '')
