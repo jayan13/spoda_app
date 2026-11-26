@@ -348,6 +348,74 @@ class _SocialLoginButton extends StatelessWidget {
       );
 }
 
+class _MatchLoginSheet extends StatefulWidget {
+  const _MatchLoginSheet();
+
+  @override
+  State<_MatchLoginSheet> createState() => _MatchLoginSheetState();
+}
+
+class _MatchLoginSheetState extends State<_MatchLoginSheet> {
+  StreamSubscription<Uri>? _linkSubscription;
+  bool _handlingCallback = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _linkSubscription = AppLinks().uriLinkStream.listen(_handleAuthLink);
+  }
+
+  Future<void> _handleAuthLink(Uri uri) async {
+    if (_handlingCallback || uri.scheme != 'spoda' || uri.host != 'auth' || uri.path != '/callback') return;
+    final fragment = uri.fragment.isEmpty ? <String, String>{} : Uri.splitQueryString(uri.fragment);
+    final token = uri.queryParameters['access_token'] ?? fragment['access_token'];
+    if (token == null || token.isEmpty) return;
+    _handlingCallback = true;
+    try {
+      await AuthService.instance.storeProviderTokens(uri);
+      final profile = await AuthService.instance.restoreProfile();
+      if (!mounted) return;
+      if (profile == null) throw const AuthException('Sign-in completed, but the profile could not be loaded.');
+      Navigator.of(context).pop(true);
+    } on AuthException catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+    } finally {
+      _handlingCallback = false;
+    }
+  }
+
+  Future<void> _emailLogin() async {
+    final loggedIn = await Navigator.of(context).push<bool>(MaterialPageRoute(builder: (_) => EmailLoginPage(onLoggedIn: () {})));
+    if (loggedIn == true && mounted) Navigator.of(context).pop(true);
+  }
+
+  @override
+  void dispose() {
+    _linkSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(child: Padding(
+    padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+    child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Align(alignment: Alignment.centerRight, child: InkWell(onTap: () => Navigator.of(context).pop(), child: const Icon(Icons.cancel, color: AppColors.border, size: 22))),
+      const SizedBox(height: 10),
+      const Text('Login to get full match insights', textAlign: TextAlign.center, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+      const SizedBox(height: 6),
+      const Text('Get 3 match Passes for free when you login', textAlign: TextAlign.center, style: TextStyle(fontSize: 12)),
+      const SizedBox(height: 16),
+      _SocialLoginButton(label: 'Continue with Google', asset: 'assets/google.png', onPressed: () => _startSocialLogin(context, 'google')),
+      const SizedBox(height: 12),
+      _SocialLoginButton(label: 'Continue with Facebook', asset: 'assets/facebook.png', onPressed: () => _startSocialLogin(context, 'facebook')),
+      const SizedBox(height: 12),
+      _SocialLoginButton(label: 'Continue with email', asset: 'assets/email.png', onPressed: _emailLogin),
+      const SizedBox(height: 16),
+      const Text('By continuing, you agree to the Terms of Service\nand acknowledge our Privacy Policy.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.muted, fontSize: 9, height: 1.5)),
+    ]),
+  ));
+}
+
 class EmailLoginPage extends StatefulWidget {
   const EmailLoginPage({super.key, this.onLoggedIn});
   final VoidCallback? onLoggedIn;
@@ -1152,6 +1220,7 @@ class _HomePageState extends State<HomePage> {
                 child: _LiveMatchCard(
                   match: cards[index].$1,
                   live: true,
+                  borderColor: index == 0 ? AppColors.acid : const Color(0xFF2A2A2A),
                   scorecard: cards[index].$2,
                   onTap: () => _openMatchDetails(cards[index].$1, cards[index].$2),
                 ),
@@ -1584,9 +1653,10 @@ class _BlogListPageState extends State<BlogListPage> {
 }
 
 class _LiveMatchCard extends StatefulWidget {
-  const _LiveMatchCard({required this.match, required this.live, required this.onTap, this.scorecard});
+  const _LiveMatchCard({required this.match, required this.live, required this.onTap, this.scorecard, this.borderColor = AppColors.acid});
   final MatchData match;
   final bool live;
+  final Color borderColor;
   final VoidCallback onTap;
   final Map<String, dynamic>? scorecard;
   @override
@@ -1722,13 +1792,14 @@ class _LiveMatchCardState extends State<_LiveMatchCard> {
   }
 
   @override
-  Widget build(BuildContext context) => _LiveMatchCardView(match: widget.match, live: widget.live, onTap: widget.onTap, scorecard: widget.scorecard, momentum: _momentum ?? (_loading ? 'Checking this over momentum…' : 'Win chances shifted by 1% this over'));
+  Widget build(BuildContext context) => _LiveMatchCardView(match: widget.match, live: widget.live, onTap: widget.onTap, scorecard: widget.scorecard, borderColor: widget.borderColor, momentum: _momentum ?? (_loading ? 'Checking this over momentum…' : 'Win chances shifted by 1% this over'));
 }
 
 class _LiveMatchCardView extends StatelessWidget {
-  const _LiveMatchCardView({required this.match, required this.live, required this.onTap, required this.momentum, this.scorecard});
+  const _LiveMatchCardView({required this.match, required this.live, required this.onTap, required this.momentum, required this.borderColor, this.scorecard});
   final MatchData match;
   final bool live;
+  final Color borderColor;
   final VoidCallback onTap;
   final String momentum;
   final Map<String, dynamic>? scorecard;
@@ -1739,7 +1810,7 @@ class _LiveMatchCardView extends StatelessWidget {
           onTap: onTap,
           child: Container(
             padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: const Color(0xFF090909), border: Border.all(color: AppColors.acid)),
+            decoration: BoxDecoration(color: const Color(0xFF090909), border: Border.all(color: borderColor)),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Row(children: [
                 Icon(Icons.circle, size: 8, color: live ? AppColors.red : AppColors.muted),
@@ -1880,6 +1951,8 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   static const _prompts = ['Top Runs?', 'Top Performer?', 'Match Winner?'];
   static const _squadBorder = Color(0xFF404040);
   final _question = TextEditingController();
+  final _aiScrollController = ScrollController();
+  final _aiLoadingStream = Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick + 1);
   late Future<bool> _isLoggedIn = _checkLogin();
   final List<({String question, String answer})> _aiMessages = [];
   static const _chatStorage = FlutterSecureStorage();
@@ -2098,9 +2171,13 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Future<bool> _requireLogin() async {
     if (await _checkLogin()) return true;
     if (!mounted) return false;
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => LoginPage(onLoggedIn: () {
-      if (mounted) setState(() { _isLoggedIn = Future.value(true); });
-    })));
+    await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF151515),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => const _MatchLoginSheet(),
+    );
     final loggedIn = await _checkLogin();
     if (mounted) setState(() { _isLoggedIn = Future.value(loggedIn); });
     return loggedIn;
@@ -2225,6 +2302,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
         _question.clear();
         _selectDetailTab(1);
       });
+      FocusManager.instance.primaryFocus?.unfocus();
       _scrollLatestAiContentIntoView();
       final started = DateTime.now();
       final response = await AuthService.instance.sendAgentMessage(
@@ -2645,7 +2723,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   }
 
   @override
-  void dispose() { _commentaryRefreshTimer?.cancel(); _predictionRefreshTimer?.cancel(); _question.dispose(); super.dispose(); }
+  void dispose() { _commentaryRefreshTimer?.cancel(); _predictionRefreshTimer?.cancel(); _question.dispose(); _aiScrollController.dispose(); super.dispose(); }
 
   bool _switcherIsLive(MatchData match, [Map<String, dynamic>? scorecard]) => _isLiveStatus(match, scorecard);
   bool _switcherIsDone(MatchData match, [Map<String, dynamic>? scorecard]) => _isCompletedStatus(match, scorecard);
@@ -4763,6 +4841,10 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
 
   void _scrollLatestAiContentIntoView() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _pendingAiQuestion != null && _aiScrollController.hasClients) {
+        _aiScrollController.animateTo(_aiScrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+        return;
+      }
       final latestContext = _latestAiContentKey.currentContext;
       if (mounted && latestContext != null) {
         Scrollable.ensureVisible(latestContext, alignment: 0, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
@@ -4818,17 +4900,11 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       final percent = '${probability.toStringAsFixed(probability % 1 == 0 ? 0 : 1)}%';
       final projected = data?['projectedScoreMetadata'];
       final prediction = projected is Map ? projected['prediction'] : null;
-      final chase = projected is Map ? projected['chase'] : null;
-      String score = '—';
-      if (prediction is Map) {
-        final low = prediction['min'] ?? prediction['low'] ?? prediction['lower'];
-        final high = prediction['max'] ?? prediction['high'] ?? prediction['upper'];
-        score = low != null && high != null ? '$low–$high' : (prediction['score'] ?? prediction['value'] ?? '—').toString();
-      } else if (prediction != null) {
-        score = prediction.toString();
-      } else if (chase is Map && chase['target'] != null) {
-        score = 'Target ${chase['target']}';
-      }
+      final low = prediction is Map ? prediction['low']?.toString().trim() : null;
+      final high = prediction is Map ? prediction['high']?.toString().trim() : null;
+      final score = low != null && low.isNotEmpty && high != null && high.isNotEmpty
+          ? '$low–$high'
+          : 'Unavailable';
       final updated = DateTime.tryParse(data?['updatedAt']?.toString() ?? '')?.toLocal();
       final at = metadata['at'];
       final over = at is Map ? at['overs'] : null;
@@ -4849,7 +4925,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             const Spacer(),
             if (over != null) Text('Updated after $over overs', style: const TextStyle(color: AppColors.muted, fontSize: 10)),
           ]), const Divider(color: AppColors.border)],
-          Row(children: [Expanded(child: _matchUnlocked ? metrics : Stack(alignment: Alignment.center, children: [ImageFiltered(imageFilter: ui.ImageFilter.blur(sigmaX: 5, sigmaY: 5), child: metrics), const Icon(Icons.lock_outline, color: Colors.white, size: 20)])), if (!_matchUnlocked) TextButton(onPressed: _predictionUnlocking ? null : _unlockPrediction, child: const Text('Unlock ›', style: TextStyle(color: AppColors.acid, fontSize: 12))) else if (justification.isNotEmpty) TextButton(onPressed: () => showModalBottomSheet<void>(
+          Row(children: [Expanded(child: _matchUnlocked ? metrics : Stack(alignment: Alignment.center, children: [ImageFiltered(imageFilter: ui.ImageFilter.blur(sigmaX: 5, sigmaY: 5), child: metrics), const Row(children: [Expanded(child: Icon(Icons.lock_outline, color: Colors.white, size: 20)), Expanded(child: Icon(Icons.lock_outline, color: Colors.white, size: 20)), Expanded(child: Icon(Icons.lock_outline, color: Colors.white, size: 20))])])), if (!_matchUnlocked) TextButton(onPressed: _predictionUnlocking ? null : _unlockPrediction, child: const Text('Unlock ›', style: TextStyle(color: AppColors.acid, fontSize: 12))) else if (justification.isNotEmpty) TextButton(onPressed: () => showModalBottomSheet<void>(
             context: context, isScrollControlled: true, backgroundColor: const Color(0xFF151515),
             shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
             builder: (context) {
@@ -4887,6 +4963,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
             FutureBuilder<bool>(future: _isLoggedIn, builder: (context, snapshot) => snapshot.data == true ? const SizedBox.shrink() : OutlinedButton(onPressed: _requireLogin, child: const Text('Log in to chat', style: TextStyle(color: AppColors.acid)))),
           ])))
         : ListView.builder(
+            controller: _aiScrollController,
             padding: const EdgeInsets.fromLTRB(12, 14, 12, 10),
             itemCount: _aiMessages.length + (_pendingAiQuestion == null ? 0 : 1),
             itemBuilder: (context, index) {
@@ -4947,7 +5024,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   ]);
 
   Widget _aiLoadingCard() => StreamBuilder<int>(
-    stream: Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick + 1),
+    stream: _aiLoadingStream,
     initialData: 0,
     builder: (context, snapshot) {
       final seconds = snapshot.data ?? 0;
@@ -4956,7 +5033,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
       return Padding(padding: const EdgeInsets.only(bottom: 18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [Image.asset('assets/chat-icon.png', width: 30, height: 30), const SizedBox(width: 7), const Text('Spoda AI', style: TextStyle(fontSize: 12))]),
         const SizedBox(height: 8),
-        Container(padding: const EdgeInsets.all(12), color: AppColors.surface, child: Row(children: [
+        Container(padding: const EdgeInsets.all(12), color: const Color(0xFF151515), child: Row(children: [
           Expanded(child: Column(children: [for (var i = 0; i < steps.length; i++) Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Icon(seconds > i ? Icons.check_circle : Icons.circle, size: 12, color: seconds > i ? const Color(0xFF21AE73) : AppColors.border), const SizedBox(width: 6), Expanded(child: Text(steps[i], style: const TextStyle(fontSize: 11)))]))])),
           const SizedBox(width: 12),
           SizedBox(width: 55, height: 55, child: Stack(alignment: Alignment.center, children: [CircularProgressIndicator(value: progress, color: const Color(0xFF21AE73), backgroundColor: AppColors.border, strokeWidth: 5), Text('${(progress * 100).round()}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold))])),
@@ -4972,7 +5049,7 @@ class _MatchDetailPageState extends State<MatchDetailPage> {
   Widget _aiComposer() => SafeArea(top: false, child: Padding(padding: const EdgeInsets.fromLTRB(10, 6, 10, 8), child: Row(children: [
     Expanded(child: TextField(controller: _question, minLines: 1, maxLines: 3, textInputAction: TextInputAction.send, onSubmitted: (_) => _submitAiQuestion(), style: const TextStyle(fontSize: 13), decoration: const InputDecoration(hintText: 'Ask anything about cricket...', hintStyle: TextStyle(color: AppColors.muted, fontSize: 12), filled: true, fillColor: AppColors.surface, contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 12), enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.border), borderRadius: BorderRadius.zero), focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppColors.acid), borderRadius: BorderRadius.zero)))),
     const SizedBox(width: 7),
-    SizedBox(width: 42, height: 42, child: IconButton.filled(onPressed: _chatSending ? null : () => _submitAiQuestion(), style: IconButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background, shape: const RoundedRectangleBorder(), padding: EdgeInsets.zero), icon: _chatSending ? const SizedBox(width: 17, height: 17, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.background)) : const Icon(Icons.send, size: 19))),
+    SizedBox(width: 42, height: 42, child: IconButton.filled(onPressed: _chatSending ? null : () => _submitAiQuestion(), style: IconButton.styleFrom(backgroundColor: AppColors.acid, foregroundColor: AppColors.background, shape: const RoundedRectangleBorder(), padding: EdgeInsets.zero), icon: const Icon(Icons.send, size: 19))),
   ])));
 
   Widget _askAiSection() => Container(
@@ -5750,6 +5827,7 @@ class MatchPassesPage extends StatefulWidget {
 class _MatchPassesPageState extends State<MatchPassesPage> {
   late Future<int> _passes = AuthService.instance.remainingPasses();
   late Future<List<Map<String, dynamic>>> _history = AuthService.instance.passHistory(isUsed: true);
+  final Map<String, Future<Map<String, dynamic>?>> _historyScorecards = {};
   int _historyVisible = 4;
   static const _countries = ['INDIA', 'UNITED STATES', 'UNITED KINGDOM', 'AUSTRALIA', 'UAE', 'SOUTH AFRICA'];
 
@@ -5787,6 +5865,25 @@ class _MatchPassesPageState extends State<MatchPassesPage> {
 
   String _month(int value) => const ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][value - 1];
 
+  Future<Map<String, dynamic>?> _historyScorecard(String matchId) => _historyScorecards.putIfAbsent(matchId, () async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    try {
+      final request = await client.getUrl(Uri.https('api.spoda.ai', '/match-scorecard', {'matchId': matchId})).timeout(const Duration(seconds: 20));
+      final response = await request.close().timeout(const Duration(seconds: 20));
+      if (response.statusCode < 200 || response.statusCode >= 300) return null;
+      final data = jsonDecode(await response.transform(utf8.decoder).join().timeout(const Duration(seconds: 20)));
+      return data is Map ? Map<String, dynamic>.from(data) : null;
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  });
+
+  Widget _historyTeamLogo(String? url) => url == null || url.isEmpty
+      ? const Icon(Icons.shield, size: 16, color: AppColors.muted)
+      : ClipOval(child: Image.network(url, width: 16, height: 16, fit: BoxFit.cover, errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 16, color: AppColors.muted)));
+
   Widget _historyCard(Map<String, dynamic> pass) {
     final rawDetails = pass['matchDetails'];
     final details = rawDetails is Map ? rawDetails : const <String, dynamic>{};
@@ -5794,15 +5891,30 @@ class _MatchPassesPageState extends State<MatchPassesPage> {
     final teamOne = (details['teamName1'] ?? '').toString().trim();
     final teamTwo = (details['teamName2'] ?? '').toString().trim();
     final teams = teamOne.isNotEmpty && teamTwo.isNotEmpty ? '$teamOne  vs  $teamTwo' : title.isNotEmpty ? title : 'Match pass used';
+    final matchId = (details['matchId'] ?? '').toString().trim();
+    final match = MatchData(raw: Map<String, dynamic>.from(details));
     return Container(
       margin: const EdgeInsets.only(bottom: 9),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
       decoration: BoxDecoration(color: AppColors.surface, border: Border.all(color: AppColors.border)),
       child: Row(children: [
-        const Icon(Icons.sports_cricket_outlined, size: 19, color: AppColors.acid),
-        const SizedBox(width: 9),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(teams, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+          FutureBuilder<Map<String, dynamic>?>(
+            future: matchId.isEmpty ? null : _historyScorecard(matchId),
+            builder: (context, snapshot) {
+              final scorecard = snapshot.data;
+              if (scorecard == null) return Text(teams, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700));
+              return Row(children: [
+                _historyTeamLogo(match.teamFlag('A', scorecard: scorecard)),
+                const SizedBox(width: 5),
+                Flexible(child: Text(match.teamName('A', scorecard: scorecard), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                const Padding(padding: EdgeInsets.symmetric(horizontal: 6), child: Text('vs', style: TextStyle(fontSize: 12))),
+                Flexible(child: Text(match.teamName('B', scorecard: scorecard), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                const SizedBox(width: 5),
+                _historyTeamLogo(match.teamFlag('B', scorecard: scorecard)),
+              ]);
+            },
+          ),
           const SizedBox(height: 5),
           Text(_historyDate(pass), style: const TextStyle(color: AppColors.muted, fontSize: 11)),
         ])),

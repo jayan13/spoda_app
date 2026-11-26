@@ -31,7 +31,7 @@ class AuthService {
   AuthService._();
   static final AuthService instance = AuthService._();
 
-  static final Uri _base = Uri.parse('https://api.spoda.ai');
+  static final Uri _base = Uri.parse('https://dev-api.spoda.ai');
   static const String redirectUrl = 'spoda://auth/callback';
   static const String passwordResetRedirectUrl = 'spoda://auth/reset';
   static const _storage = FlutterSecureStorage();
